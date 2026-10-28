@@ -1,0 +1,69 @@
+<svg width="100%" viewBox="0 0 582 250" role="img" xmlns="http://www.w3.org/2000/svg"><title>Brieno — Nanopore Signal Foundation Model</title>
+<desc>Animated logo: a stylized elephantfish (Mormyridae) with a biphasic electric-organ-discharge pulse train. Wordmark set in Michroma, converted to outlines.</desc>
+<style>
+.fish { fill: #0F6E56 }
+.fin  { fill: #0C5A45 }
+svg   { --sig-base: #5DCAA5; --sig-peak: #1D9E75 }
+.sig  { stroke: var(--sig-base); stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round }
+.wm   { fill: #0F6E56 }
+.sub  { fill: #1D9E75 }
+@media (prefers-color-scheme: dark) {
+  .fish { fill: #5DCAA5 }
+  .fin  { fill: #4BBFA0 }
+  svg   { --sig-base: #9FE1CB; --sig-peak: #E3FAF1 }
+  .wm   { fill: #5DCAA5 }
+  .sub  { fill: #9FE1CB }
+}
+/* signal pulse runs on the same 4s clock as the fins: draws in dim, peaks exactly when the fins are fully open (40%) */
+#eod-path { opacity: 0.35; stroke-dasharray: 400; stroke-dashoffset: 400;
+  animation: drawSignal 1.8s cubic-bezier(0.4, 0, 0.2, 1) forwards, pulseSignal 4s ease-in-out 1.8s infinite; }
+@keyframes drawSignal { to { stroke-dashoffset: 0; } }
+@keyframes pulseSignal { 0%, 100% { opacity: 0.35; stroke: var(--sig-base); } 40% { opacity: 1; stroke: var(--sig-peak); } }
+
+/* fins pivot at their anterior base and sway outward (no hidden filler pieces) */
+#fin-dorsal { transform-origin: 172px 48px;  animation: swayDorsal 4s ease-in-out 1.8s infinite; }
+#fin-anal   { transform-origin: 198px 137px; animation: swayAnal   4s ease-in-out 1.8s infinite; }
+@keyframes swayDorsal { 0%, 100% { transform: rotate(0deg); } 40% { transform: rotate(12deg); }  70% { transform: rotate(2deg); } }
+@keyframes swayAnal   { 0%, 100% { transform: rotate(0deg); } 40% { transform: rotate(-12deg); } 70% { transform: rotate(-2deg); } }
+#fin-pec { transform-origin: 228px 105px; animation: flutter 2.5s ease-in-out 2s infinite; }
+@keyframes flutter { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-8deg); } }
+
+/* eye: pupil glances toward the discharge at the 40% peak; a quick blink every other cycle (8s) */
+/* trunk probes: lifts at the 40% peak, dips on the way back */
+#trunk { transform-origin: 338px 113px; animation: probe 4s ease-in-out 1.8s infinite; }
+@keyframes probe { 0%, 100% { transform: rotate(0deg); } 40% { transform: rotate(-7deg); } 70% { transform: rotate(3deg); } }
+#pupil { animation: glance 4s ease-in-out 1.8s infinite; }
+@keyframes glance { 0%, 25%, 75%, 100% { transform: translate(0, 0); } 40%, 58% { transform: translate(2.2px, 0.6px); } }
+#eye { transform-origin: 332px 76px; animation: blink 8s ease-in-out 1.8s infinite; }
+@keyframes blink { 0%, 91%, 100% { transform: scaleY(1); } 93.5% { transform: scaleY(0.08); } 96% { transform: scaleY(1); } }
+
+.dot { animation: dotPulse var(--d, 3s) ease-in-out var(--dl, 0s) infinite; }
+@keyframes dotPulse { 0%, 100% { opacity: 0.12; r: var(--r0); } 50% { opacity: 0.5; r: var(--r1); } }
+</style>
+
+<path class="fish" d="M 68 62 C 146 40 286 36 338 56 C 358 66 368 80 368 92 C 368 104 358 116 338 128 C 286 148 146 144 68 122 Z"/>
+<path class="fish" d="M 68 62 C 50 54 34 43 20 27 C 30 50 36 70 36 86 C 50 79 60 69 68 66 Z"/>
+<path class="fish" d="M 68 122 C 50 130 34 140 20 155 C 30 133 36 112 36 98 C 50 105 60 115 68 118 Z"/>
+<path id="trunk" class="fish" d="M 338 112 C 353.3 115.4 370.3 120.5 383.9 132.4 C 377.1 141.8 363.5 137.5 353.3 130.7 C 344.8 123.9 339.7 117.1 338 113.7 Z"/>
+<path id="fin-dorsal" class="fin" d="M 172 48 C 169 34 164 26 156 24 C 146 28 134 41 124 53 Z"/>
+<path id="fin-anal" class="fin" d="M 198 137 C 195 150 188 160 176 162 C 158 159 134 144 113 131 Z"/>
+<path id="fin-pec" class="fin" d="M 228 92 C 220 102 216 115 222 120 C 228 110 232 98 228 92 Z"/>
+<g id="eye">
+<circle cx="332" cy="76" r="9" fill="white"/>
+<g id="pupil">
+<circle cx="334" cy="77" r="5" fill="#093D30"/>
+<circle class="fish" cx="334" cy="77" r="5"/>
+<circle cx="332" cy="74" r="2" fill="white" opacity="0.5"/>
+</g>
+</g>
+<path id="eod-path" class="sig" d="M 400 96 L 422 96 L 428 75 L 437 119 L 446 96 L 468 96 L 474 75 L 483 119 L 492 96 L 513 96 L 519 75 L 529 119 L 538 96 L 562 96"/>
+<circle class="dot" fill="#5DCAA5" cx="88" cy="34" r="2.6" style="--r0:2.6px;--r1:4.7px;--d:2.8s;--dl:0s"/>
+<circle class="dot" fill="#5DCAA5" cx="180" cy="18" r="1.7" style="--r0:1.7px;--r1:3.1px;--d:3.4s;--dl:.7s"/>
+<circle class="dot" fill="#5DCAA5" cx="240" cy="30" r="3.1" style="--r0:3.1px;--r1:5.6px;--d:3s;--dl:1.4s"/>
+<circle class="dot" fill="#5DCAA5" cx="300" cy="37" r="1.9" style="--r0:1.9px;--r1:3.4px;--d:3.7s;--dl:.3s"/>
+<circle class="dot" fill="#5DCAA5" cx="72" cy="148" r="2.1" style="--r0:2.1px;--r1:3.8px;--d:2.6s;--dl:1.9s"/>
+<circle class="dot" fill="#5DCAA5" cx="218" cy="159" r="2.7" style="--r0:2.7px;--r1:4.9px;--d:3.2s;--dl:1.1s"/>
+<circle class="dot" fill="#5DCAA5" cx="282" cy="151" r="1.5" style="--r0:1.5px;--r1:2.7px;--d:3.9s;--dl:2.3s"/>
+<g class="wm" aria-label="Brieno"><path d="M212.6 198V172H233.3Q236.2 172 238.1 172.6Q240 173.1 240.9 174.5Q241.8 175.9 241.8 178.4Q241.8 180.8 240.7 182.3Q239.7 183.8 237.5 183.9Q240.3 184.2 241.6 186Q242.9 187.7 242.9 190.4Q242.9 192.7 242.4 194.2Q241.8 195.7 240.6 196.5Q239.3 197.4 237.2 197.7Q235 198 231.8 198ZM215.8 182.8H231Q233.6 182.8 235.3 182.6Q236.9 182.5 237.7 181.5Q238.6 180.6 238.6 178.4Q238.6 176.7 238.1 175.9Q237.6 175.1 236.4 174.9Q235.3 174.7 233.3 174.7H215.8ZM215.8 195.3H231.8Q234.2 195.3 235.7 195.2Q237.2 195.1 238.1 194.6Q238.9 194.1 239.3 193.2Q239.6 192.2 239.6 190.4Q239.6 188.6 239 187.6Q238.3 186.6 237.1 186.2Q235.9 185.7 234.3 185.6Q232.8 185.5 231 185.5H215.8Z"/><path d="M250.6 198V178.5H253.8V181.2Q254.4 180.3 254.9 179.8Q255.5 179.2 256.3 178.8Q257.2 178.5 258.8 178.4Q260.3 178.2 262.8 178.2V180.9Q259.4 180.9 257.6 181.2Q255.7 181.4 254.9 182Q254.1 182.5 254 183.5Q253.8 184.5 253.8 186.1V198Z"/><path d="M269.9 198V179.6H273.2V198ZM269.9 175.2V172H273.2V175.2Z"/><path d="M302.8 192.2Q302.8 194.4 302.2 195.6Q301.5 196.9 300.2 197.5Q298.8 198.1 296.8 198.2Q294.7 198.4 291.8 198.4Q288.6 198.4 286.3 198Q284 197.7 282.6 196.7Q281.2 195.7 280.6 193.6Q280 191.6 280 188.1Q280 184.8 280.6 182.8Q281.2 180.8 282.6 179.8Q284 178.8 286.2 178.5Q288.5 178.1 291.8 178.1Q295.5 178.1 297.9 178.7Q300.4 179.2 301.6 180.6Q302.8 182.1 302.8 185V189.1H283.2Q283.2 191.3 283.5 192.6Q283.8 193.9 284.7 194.6Q285.5 195.2 287.3 195.5Q289 195.7 291.8 195.7Q294.4 195.7 296 195.6Q297.6 195.5 298.4 195.1Q299.2 194.8 299.5 194.1Q299.8 193.4 299.8 192.2ZM291.8 180.8Q289 180.8 287.3 181Q285.6 181.2 284.7 181.8Q283.9 182.4 283.6 183.6Q283.2 184.7 283.2 186.6H299.7V185Q299.7 183.7 299.4 182.9Q299.1 182.1 298.3 181.7Q297.5 181.2 295.9 181Q294.4 180.8 291.8 180.8Z"/><path d="M310.1 198V178.5H313.3V181.1Q314.1 180.1 315.1 179.4Q316.2 178.8 318 178.5Q319.8 178.1 322.7 178.1Q326.6 178.1 328.8 178.9Q331 179.6 331.9 181.5Q332.9 183.4 332.9 186.9V198H329.6V186.9Q329.6 184.9 329.2 183.7Q328.9 182.5 328.1 181.9Q327.3 181.3 325.8 181Q324.4 180.8 322.2 180.8Q318.8 180.8 316.9 181.4Q314.9 182 314.1 183.1Q313.3 184.3 313.3 186.3V198Z"/><path d="M351.5 198.4Q348.2 198.4 346 198Q343.7 197.7 342.3 196.7Q340.9 195.7 340.2 193.6Q339.6 191.6 339.6 188.1Q339.6 184.8 340.2 182.8Q340.9 180.8 342.3 179.8Q343.7 178.8 346 178.5Q348.2 178.1 351.5 178.1Q354.8 178.1 357.1 178.5Q359.3 178.8 360.8 179.8Q362.2 180.8 362.8 182.8Q363.4 184.8 363.4 188.1Q363.4 191.6 362.8 193.6Q362.2 195.7 360.8 196.7Q359.3 197.7 357.1 198Q354.8 198.4 351.5 198.4ZM360.2 188.1Q360.2 185.7 359.9 184.3Q359.7 182.8 358.9 182.1Q358 181.3 356.3 181.1Q354.5 180.8 351.5 180.8Q348.5 180.8 346.7 181.1Q345 181.3 344.1 182.1Q343.3 182.8 343.1 184.3Q342.8 185.7 342.8 188.1Q342.8 190.7 343.1 192.2Q343.3 193.7 344.1 194.4Q345 195.2 346.7 195.4Q348.5 195.7 351.5 195.7Q354.5 195.7 356.3 195.4Q358 195.2 358.9 194.4Q359.7 193.7 359.9 192.2Q360.2 190.7 360.2 188.1Z"/></g>
+<text x="288" y="225" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="400" letter-spacing="3" class="sub">NANOPORE SIGNAL FOUNDATION MODEL</text>
+</svg>
