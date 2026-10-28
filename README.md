@@ -6,9 +6,9 @@
 [![bioRxiv](https://img.shields.io/badge/bioRxiv-TBA-green)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/guangzhaocs/Brieno/blob/main/LICENSE)
-<!-- Enable once the repository is public and the package is on PyPI:
+[![PyPI](https://img.shields.io/pypi/v/brieno)](https://pypi.org/project/brieno/)
+<!-- Enable once the repository is public:
 [![Release](https://img.shields.io/github/v/release/guangzhaocs/Brieno?include_prereleases)](https://github.com/guangzhaocs/Brieno/releases)
-[![PyPI](https://img.shields.io/pypi/v/brieno)]()
 [![Downloads](https://img.shields.io/pepy/dt/brieno?color=97ca00)]()
 -->
 
@@ -40,21 +40,9 @@ for transferable representations of raw nanopore signals.
 
 ## Name origin
 
-*Brieno* is a shortened form of [*Brienomyrus*](https://en.wikipedia.org/wiki/Brienomyrus), a genus of weakly electric fishes that
-communicate through patterns of electric pulses — reading meaning from an electrical
-signal rather than from a written sequence.
-
-## Status
-
-This repository is the public home of Brieno. Code, pretrained weights and usage
-instructions are being prepared for release and will be added here. The manuscript
-describing the method is currently under review.
-
-## Topics
-
-Nanopore sequencing · self-supervised learning · foundation models · raw signal
-representation learning · vector quantization · species identification · metagenomics ·
-DNA methylation
+*Brieno* is a shortened form of [*Brienomyrus*](https://en.wikipedia.org/wiki/Brienomyrus), a genus of weakly
+electric fishes that communicate through patterns of electric pulses. The name reflects
+the model's aim to learn informative patterns from raw nanopore ionic current signals.
 
 ## Citation
 
