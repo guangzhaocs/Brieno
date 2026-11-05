@@ -12,7 +12,9 @@ Two layers, split by audience:
 
 * **Building a model** — everything developer-facing lives under ``brieno train``::
 
-      brieno train prep    raw FAST5/POD5 -> normalised signal chunks
+      brieno train prep       raw FAST5/POD5 -> normalised signal chunks
+      brieno train merge      chunk shards -> one array per dataset
+      brieno train tokenizer  pretrain the signal tokenizer
 
 Subcommands are registered here but their implementations are imported lazily, so
 ``brieno --help`` does not pay for importing torch.
@@ -106,6 +108,86 @@ def _run_train_prep(args):
     return 0
 
 
+# -------------------------------------------------------------- brieno train merge
+def _add_train_merge(subparsers):
+    p = subparsers.add_parser(
+        "merge",
+        help="concatenate one dataset's chunk shards into a single .npy",
+        description=(
+            "Merge the shards 'brieno train prep' wrote for one dataset into the single "
+            "array the tokenizer trainer reads. Done in two passes over memory-mapped "
+            "files, so the corpus never has to fit in RAM. Name the output after the "
+            "dataset: that name is the key used in the training config."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-i", "--input", required=True, metavar="DIR",
+                   help="directory of .npy shards for ONE dataset")
+    p.add_argument("-o", "--output", required=True, metavar="FILE",
+                   help="output .npy file")
+    p.add_argument("-r", "--recursive", action="store_true",
+                   help="also look in subdirectories of --input")
+    p.add_argument("-f", "--force", action="store_true", help="overwrite an existing output")
+    p.add_argument("--no-progress", action="store_true", help="no progress bar")
+    p.set_defaults(func=_run_train_merge)
+
+
+def _run_train_merge(args):
+    from brieno.data.merge import merge_shards
+
+    merge_shards(args.input, args.output, recursive=args.recursive,
+                 force=args.force, progress=not args.no_progress)
+    return 0
+
+
+# ----------------------------------------------------------- brieno train tokenizer
+def _add_train_tokenizer(subparsers):
+    p = subparsers.add_parser(
+        "tokenizer",
+        help="pretrain the signal tokenizer on chunked raw signal",
+        description=(
+            "Self-supervised pretraining of the residual-vector-quantization tokenizer: "
+            "reconstruct the raw signal through the quantizer, minimising "
+            "L1(reconstruction, signal) + vq_loss. No labels are used, so any corpus of "
+            "raw reads works. Run under torchrun for multi-GPU training."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-c", "--config", required=True, metavar="JSON",
+                   help="training config (see configs/ for an example)")
+    p.add_argument("-s", "--seed", type=int, default=42, help="base seed; each rank adds its index")
+    p.add_argument("-n", "--run-name", default=None, metavar="NAME",
+                   help="output subdirectory under training.save_dir [default: a timestamp]")
+    p.add_argument("--resume", default=None, metavar="CKPT",
+                   help="continue from a checkpoint written by an earlier run")
+    g = p.add_argument_group("config overrides (leave unset to use the config file)")
+    g.add_argument("--lr", type=float, default=None)
+    g.add_argument("--batch-size", type=int, default=None)
+    g.add_argument("--epochs", type=int, default=None)
+    g.add_argument("--commitment-cost", type=float, default=None)
+    g.add_argument("--ema-decay", type=float, default=None)
+    g.add_argument("--dropout", type=float, default=None,
+                   help="sets encoder and decoder dropout together")
+    p.set_defaults(func=_run_train_tokenizer)
+
+
+def _run_train_tokenizer(args):
+    from brieno.train.tokenizer import pretrain_tokenizer
+
+    overrides = [
+        ("training", "lr", args.lr),
+        ("training", "batch_size", args.batch_size),
+        ("training", "epochs", args.epochs),
+        ("model", "commitment_cost", args.commitment_cost),
+        ("model", "ema_decay", args.ema_decay),
+        ("model", "encoder_dropout", args.dropout),
+        ("model", "decoder_dropout", args.dropout),
+    ]
+    pretrain_tokenizer(args.config, seed=args.seed, run_name=args.run_name,
+                       resume=args.resume, overrides=overrides)
+    return 0
+
+
 # ------------------------------------------------------------------- brieno train
 def _add_train(subparsers):
     p = subparsers.add_parser(
@@ -117,6 +199,8 @@ def _add_train(subparsers):
     )
     sub = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     _add_train_prep(sub)
+    _add_train_merge(sub)
+    _add_train_tokenizer(sub)
     p.set_defaults(func=_print_help_and_fail(p))
     return p
 
@@ -141,7 +225,18 @@ def main(argv=None):
     if not getattr(args, "command", None):
         parser.print_help()
         return 1
-    return args.func(args)
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nbrieno: interrupted", file=sys.stderr)
+        return 130
+    except (FileNotFoundError, FileExistsError, IsADirectoryError, NotADirectoryError,
+            PermissionError, ValueError, KeyError) as exc:
+        # Expected, actionable failures: a bad path, a malformed config, a mismatched
+        # shard. Report them as a message, not as a traceback; anything else is a bug
+        # and keeps its traceback.
+        print(f"brieno: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

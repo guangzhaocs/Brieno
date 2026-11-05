@@ -1,0 +1,64 @@
+{
+  "_comment": "Recipe of the released R9.4.1 tokenizer: 8x downsample, 4 residual codebooks of 1024 entries quantised in a 64-d projected space. Point datasets.pretrain_root at a directory of merged .npy files (one per dataset) and training.save_dir at where runs should be written.",
+  "datasets": {
+    "pretrain_root": "/path/to/tokenizer_pretrain_datasets",
+    "pretrain_weights": [
+      { "name": "Ecoli_Unmethylated_R9_Zenodo7970715", "weight": 0.12 },
+      { "name": "Hsapiens_Native_R9_HG001MinGridPart4", "weight": 0.07 },
+      { "name": "Hsapiens_Native_R9_HG001PromethPart1", "weight": 0.07 },
+      { "name": "Osativa_Native_R9_PRJNA764549", "weight": 0.06 },
+      { "name": "Athaliana_EcoGII-Hia5_R9_PRJEB69301", "weight": 0.06 },
+      { "name": "Athaliana_Native_R9_PRJNA764549", "weight": 0.05 },
+      { "name": "Zmays_EcoGII_R9_PRJEB69301", "weight": 0.05 },
+      { "name": "Saureus_Native_R9_PRJEB51164", "weight": 0.08 },
+      { "name": "StreptomycesS6_Native_R9_PRJNA514949", "weight": 0.08 },
+      { "name": "Synthetic_8oxoG_R9_PRJEB76712", "weight": 0.12 },
+      { "name": "ZymoHMW_Native_R9_PRJEB48692", "weight": 0.12 },
+      { "name": "ZymoMock_Native_R9_PRJEB29504", "weight": 0.12 }
+    ],
+    "validation": [
+      "Athaliana_Native_R9_PRJNA764549",
+      "Athaliana_EcoGII-Hia5_R9_PRJEB69301",
+      "Ecoli_Native_R9_PRJEB51164",
+      "Ecoli_Unmethylated_R9_Zenodo7970715",
+      "Hsapiens_Induced8oxoG_R9_PRJEB76712",
+      "Hsapiens_Native_R9_HG001PromethPart1",
+      "Hsapiens_Native_R9_HG001MinGridPart4",
+      "Hsapiens_NativeMod_R9_HG002ONT202109",
+      "Lambda_Native_R9_PRJNA926802",
+      "Osativa_Native_R9_PRJNA764549",
+      "StreptomycesS6_Native_R9_PRJNA514949",
+      "Saureus_Native_R9_PRJEB51164",
+      "Synthetic_8oxoG_R9_PRJEB76712",
+      "Zmays_EcoGII_R9_PRJEB69301",
+      "ZymoHMW_Native_R9_PRJEB48692",
+      "ZymoMock_Native_R9_PRJEB29504"
+    ],
+    "validation_size_per_dataset": 25600
+  },
+  "training": {
+    "save_dir": "/path/to/runs",
+    "batch_size": 256,
+    "epochs": 40,
+    "early_stop": 40,
+    "epoch_length": 2560000,
+    "lr": 5e-4,
+    "warmup_steps": 5000,
+    "weight_decay": 0.01,
+    "num_workers": 8
+  },
+  "model": {
+    "hidden_dim": 768,
+    "num_quantizers": 4,
+    "num_tokens": 1024,
+    "commitment_cost": 4.0,
+    "ema_decay": 0.9,
+    "encoder_dropout": 0.0,
+    "decoder_dropout": 0.0,
+    "downsample": 8,
+    "quant_dim": 64
+  },
+  "logging": {
+    "log_every_n_steps": 50
+  }
+}

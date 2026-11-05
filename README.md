@@ -40,6 +40,24 @@ Nanopore's fish-inspired tool names, such as Bonito and Dorado, and also reflect
 model's aim to learn informative patterns in the ionic current signals recorded during
 nanopore sequencing.
 
+## Installation
+
+```bash
+git clone https://github.com/guangzhaocs/Brieno.git
+cd Brieno
+pip install -e ".[fast5,pod5]"
+```
+
+`fast5` and `pod5` are separate extras — install the one your data is in, or both.
+
+## Training your own model
+
+The pretrained models are the fastest way to use Brieno, but the whole pipeline is
+here: chunking raw reads, pretraining the tokenizer and the transformer, and
+fine-tuning a task head. Everything developer-facing lives under `brieno train`.
+
+See the [training guide](docs/training.md).
+
 ## Citation
 
 Citation details will be added once the manuscript is available. Until then, please
