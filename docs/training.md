@@ -28,7 +28,11 @@ raw FAST5/POD5
       ▼
   signal tokenizer
       │
-      │  transformer pretraining        ○ not yet implemented
+      │  brieno train encode            ✔ implemented
+      ▼
+  tokenized corpus
+      │
+      │  brieno train transformer       ✔ implemented
       ▼
   token transformer
       │
@@ -37,8 +41,8 @@ raw FAST5/POD5
   basecalling / demux / species / modification heads
 ```
 
-The two unimplemented stages are being ported; until they land, this guide stops at a
-trained tokenizer.
+Everything up to a pretrained transformer is here. Fine-tuning a task head is being
+prepared for a later release; until then the task models are published as weights.
 
 ---
 
@@ -226,10 +230,109 @@ What to watch:
 
 ---
 
-## 4. Pretrain the transformer
+## 4. Encode the corpus into tokens
 
-Not yet implemented in this package.
+The transformer trains on token sequences, not on signal, so the corpus has to be run
+through the finished tokenizer once:
 
-## 5. Fine-tune a task head
+```bash
+brieno train encode -m runs/my-tokenizer/tokenizer_best.pt \
+                    -i /data/corpus/Ecoli_Native_R9_PRJEB51164.npy \
+                    -o /data/tokens/Ecoli_Native_R9_PRJEB51164.npy
+```
 
-Not yet implemented in this package.
+`(N, 1, chunk_size)` float16 signal becomes `(N, num_quantizers, seq_len)` uint16 token
+ids, written through a memory-mapped output so peak memory stays flat. The tokenizer
+checkpoint carries its own `model_config`, so there is no config to pass and no way for
+the architecture to disagree with the weights.
+
+Keep the dataset filenames: they are the keys in the transformer config, exactly as
+they were in the tokenizer config.
+
+A tokenizer whose codebook k-means never completed is refused rather than used — its
+codebook is still random, and encoding with it would produce meaningless tokens that
+nothing downstream would flag.
+
+Loop over the corpus the same way as for the merge step:
+
+```bash
+for f in /data/corpus/*.npy; do
+    brieno train encode -m runs/my-tokenizer/tokenizer_best.pt \
+                        -i "$f" -o "/data/tokens/$(basename "$f")"
+done
+```
+
+---
+
+## 5. Pretrain the transformer
+
+Spans of token positions are hidden and the model predicts them from their context.
+This is the stage that turns a per-chunk code into a contextual representation, and it
+is what the downstream heads attach to.
+
+```bash
+# one GPU
+brieno train transformer -c configs/transformer_dna_r9.json
+
+# four GPUs on one node
+torchrun --nproc_per_node=4 -m brieno.cli train transformer -c configs/transformer_dna_r9.json
+```
+
+### The config
+
+Start from [`configs/transformer_dna_r9.json`](../configs/transformer_dna_r9.json), the
+recipe of the released R9.4.1 transformer. `datasets` works as it does for the
+tokenizer, except `root_dir` points at the tokenized corpus from step 4.
+
+**`masking`** — `mask_ratio` is the fraction of positions hidden and `min_span` the
+length of each hidden run. Spans rather than single positions matter here: neighbouring
+signal frames are highly correlated, so a model asked to fill in one isolated position
+can interpolate from its neighbours without learning anything. The start probability is
+corrected for span overlap, so the realised fraction matches `mask_ratio` instead of
+overshooting it by `min_span`.
+
+The same positions are masked in **every** quantizer layer at once. Masking a position
+in one layer only would leave the model the same information through another codebook,
+and it would learn to copy rather than to predict.
+
+`layer_weights` sets each quantizer layer's share of the loss. The released recipe uses
+`[1.0, 0.5, 0.2, 0.1]`: the first codebook carries most of the signal, and later
+residual layers are progressively closer to noise, so weighting them equally would
+spend most of the model's capacity predicting what cannot be predicted.
+
+**`training`** — `epoch_length` is optimizer steps per GPU per epoch, so an epoch means
+the same amount of work however many GPUs are used. `grad_accum_steps` multiplies the
+effective batch without the memory of a larger one; the effective global batch is
+`batch_size × world_size × grad_accum_steps`, printed at startup so it is not left to
+arithmetic.
+
+`betas` and `eps` default to `(0.9, 0.98)` and `1e-6`, the transformer convention rather
+than PyTorch's AdamW defaults, and the values the released weights were trained with.
+Biases and LayerNorm gains are automatically excluded from weight decay.
+
+### Output
+
+```
+<save_dir>/<run name>/
+    config.json            the config this run actually used
+    history.jsonl          per-step and per-epoch metrics
+    transformer_ep<N>.pt   checkpoint after each epoch
+    transformer_best.pt    lowest validation loss so far
+```
+
+`--resume <checkpoint>` continues a run that hit a wall-clock limit.
+
+What to watch in `history.jsonl`:
+
+- **`loss`** — masked-token cross-entropy, weighted across layers.
+- **`top1_L1` … `top1_L4`** — per-layer accuracy at masked positions. L1 should climb
+  well above the others; later layers staying near chance is expected, not a fault,
+  and is why their loss weights are small.
+
+---
+
+## 6. Fine-tune a task head
+
+Not yet implemented in this package. The released task models (basecalling,
+demultiplexing, species, modifications) are published as trained weights; the
+fine-tuning code that produced them is being prepared for a later release.

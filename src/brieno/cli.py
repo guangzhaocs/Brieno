@@ -15,6 +15,8 @@ Two layers, split by audience:
       brieno train prep       raw FAST5/POD5 -> normalised signal chunks
       brieno train merge      chunk shards -> one array per dataset
       brieno train tokenizer  pretrain the signal tokenizer
+      brieno train encode     signal chunks -> token ids
+      brieno train transformer  pretrain the token transformer
 
 Subcommands are registered here but their implementations are imported lazily, so
 ``brieno --help`` does not pay for importing torch.
@@ -188,6 +190,82 @@ def _run_train_tokenizer(args):
     return 0
 
 
+# ------------------------------------------------------------- brieno train encode
+def _add_train_encode(subparsers):
+    p = subparsers.add_parser(
+        "encode",
+        help="turn signal chunks into token ids with a trained tokenizer",
+        description=(
+            "Run a trained tokenizer over a merged signal file and write the discrete "
+            "token ids the transformer pretrains on: (N, num_quantizers, seq_len) uint16. "
+            "The tokenizer checkpoint carries its own architecture, so no config is needed."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-m", "--model", required=True, metavar="CKPT",
+                   help="tokenizer checkpoint from 'brieno train tokenizer'")
+    p.add_argument("-i", "--input", required=True, metavar="FILE",
+                   help="merged signal .npy for one dataset")
+    p.add_argument("-o", "--output", required=True, metavar="FILE", help="output token .npy")
+    p.add_argument("-b", "--batch-size", type=int, default=512)
+    p.add_argument("-j", "--num-workers", type=int, default=4)
+    p.add_argument("--device", default="cuda", help="cuda, cuda:N or cpu")
+    p.add_argument("-f", "--force", action="store_true", help="overwrite an existing output")
+    p.add_argument("--no-progress", action="store_true", help="no progress bar")
+    p.set_defaults(func=_run_train_encode)
+
+
+def _run_train_encode(args):
+    from brieno.data.encode import encode_dataset
+
+    encode_dataset(args.model, args.input, args.output, batch_size=args.batch_size,
+                   num_workers=args.num_workers, device=args.device,
+                   force=args.force, progress=not args.no_progress)
+    return 0
+
+
+# -------------------------------------------------------- brieno train transformer
+def _add_train_transformer(subparsers):
+    p = subparsers.add_parser(
+        "transformer",
+        help="pretrain the token transformer with masked-token prediction",
+        description=(
+            "Self-supervised pretraining of the transformer on tokenized signal: spans of "
+            "token positions are hidden and predicted from their context, in every "
+            "quantizer layer at once. Run under torchrun for multi-GPU training."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-c", "--config", required=True, metavar="JSON",
+                   help="training config (see configs/ for an example)")
+    p.add_argument("-s", "--seed", type=int, default=None,
+                   help="base seed; each rank adds its index [default: training.seed]")
+    p.add_argument("-n", "--run-name", default=None, metavar="NAME",
+                   help="output subdirectory under training.save_dir [default: a timestamp]")
+    p.add_argument("--resume", default=None, metavar="CKPT",
+                   help="continue from a checkpoint written by an earlier run")
+    g = p.add_argument_group("config overrides (leave unset to use the config file)")
+    g.add_argument("--lr", type=float, default=None)
+    g.add_argument("--batch-size", type=int, default=None)
+    g.add_argument("--epochs", type=int, default=None)
+    g.add_argument("--grad-accum-steps", type=int, default=None)
+    p.set_defaults(func=_run_train_transformer)
+
+
+def _run_train_transformer(args):
+    from brieno.train.transformer import pretrain_transformer
+
+    overrides = [
+        ("training", "lr", args.lr),
+        ("training", "batch_size", args.batch_size),
+        ("training", "epochs", args.epochs),
+        ("training", "grad_accum_steps", args.grad_accum_steps),
+    ]
+    pretrain_transformer(args.config, seed=args.seed, run_name=args.run_name,
+                         resume=args.resume, overrides=overrides)
+    return 0
+
+
 # ------------------------------------------------------------------- brieno train
 def _add_train(subparsers):
     p = subparsers.add_parser(
@@ -201,6 +279,8 @@ def _add_train(subparsers):
     _add_train_prep(sub)
     _add_train_merge(sub)
     _add_train_tokenizer(sub)
+    _add_train_encode(sub)
+    _add_train_transformer(sub)
     p.set_defaults(func=_print_help_and_fail(p))
     return p
 

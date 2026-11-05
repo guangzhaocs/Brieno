@@ -1,0 +1,70 @@
+{
+  "_comment": "Recipe of the released R9.4.1 token transformer: 8 layers, 12 heads, d_model 768, trained with masked-token prediction on signal tokenized by the released tokenizer. Point datasets.root_dir at the output of 'brieno train encode' and training.save_dir at where runs should be written.",
+  "datasets": {
+    "root_dir": "/path/to/tokenized_corpus",
+    "weights": [
+      { "name": "Ecoli_Unmethylated_R9_Zenodo7970715", "weight": 0.12 },
+      { "name": "Hsapiens_Native_R9_HG001MinGridPart4", "weight": 0.07 },
+      { "name": "Hsapiens_Native_R9_HG001PromethPart1", "weight": 0.07 },
+      { "name": "Osativa_Native_R9_PRJNA764549", "weight": 0.06 },
+      { "name": "Athaliana_EcoGII-Hia5_R9_PRJEB69301", "weight": 0.06 },
+      { "name": "Athaliana_Native_R9_PRJNA764549", "weight": 0.05 },
+      { "name": "Zmays_EcoGII_R9_PRJEB69301", "weight": 0.05 },
+      { "name": "Saureus_Native_R9_PRJEB51164", "weight": 0.08 },
+      { "name": "StreptomycesS6_Native_R9_PRJNA514949", "weight": 0.08 },
+      { "name": "Synthetic_8oxoG_R9_PRJEB76712", "weight": 0.12 },
+      { "name": "ZymoHMW_Native_R9_PRJEB48692", "weight": 0.12 },
+      { "name": "ZymoMock_Native_R9_PRJEB29504", "weight": 0.12 }
+    ],
+    "validation": [
+      "Athaliana_Native_R9_PRJNA764549",
+      "Athaliana_EcoGII-Hia5_R9_PRJEB69301",
+      "Ecoli_Native_R9_PRJEB51164",
+      "Ecoli_Unmethylated_R9_Zenodo7970715",
+      "Hsapiens_Induced8oxoG_R9_PRJEB76712",
+      "Hsapiens_Native_R9_HG001PromethPart1",
+      "Hsapiens_Native_R9_HG001MinGridPart4",
+      "Hsapiens_NativeMod_R9_HG002ONT202109",
+      "Lambda_Native_R9_PRJNA926802",
+      "Osativa_Native_R9_PRJNA764549",
+      "StreptomycesS6_Native_R9_PRJNA514949",
+      "Saureus_Native_R9_PRJEB51164",
+      "Synthetic_8oxoG_R9_PRJEB76712",
+      "Zmays_EcoGII_R9_PRJEB69301",
+      "ZymoHMW_Native_R9_PRJEB48692",
+      "ZymoMock_Native_R9_PRJEB29504"
+    ],
+    "validation_size_per_dataset": 25600
+  },
+  "masking": {
+    "mask_ratio": 0.15,
+    "min_span": 12,
+    "layer_weights": [1.0, 0.5, 0.2, 0.1]
+  },
+  "model": {
+    "vocab_size": 1024,
+    "n_layer": 8,
+    "n_head": 12,
+    "d_model": 768,
+    "max_seq_len": 2048,
+    "num_vq_layers": 4,
+    "dropout": 0.1
+  },
+  "training": {
+    "save_dir": "/path/to/runs",
+    "batch_size": 80,
+    "epochs": 70,
+    "epoch_length": 10000,
+    "lr": 6e-4,
+    "warmup_steps": 20000,
+    "weight_decay": 0.01,
+    "betas": [0.9, 0.98],
+    "eps": 1e-6,
+    "num_workers": 16,
+    "seed": 42,
+    "grad_accum_steps": 2
+  },
+  "logging": {
+    "log_every_n_steps": 20
+  }
+}
