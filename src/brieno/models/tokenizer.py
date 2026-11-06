@@ -395,9 +395,14 @@ class ResidualVectorQuantizer(nn.Module):
         ])
 
     def forward(self, x, return_layers: bool = False):
-        """return_layers=False (default): (quantized_sum, indices [Q,B,L], total_loss, losses) -- unchanged API.
-        return_layers=True: additionally returns the list of per-layer quantized outputs (each [B,D,L], straight-through,
-        so gradients reach the encoder through any single layer), used by the guide heads when guide_layers != 'all'."""
+        """Quantize ``x`` through the residual codebook stack.
+
+        Returns ``(quantized_sum, indices [Q,B,L], total_loss, per_layer_losses)``.
+        With ``return_layers=True`` the per-layer quantized outputs are appended as a
+        fifth element (each ``[B,D,L]``, straight-through, so gradients reach the
+        encoder through any single layer) for callers that attach to one layer rather
+        than to the sum.
+        """
         quantized_out = torch.zeros_like(x)
         residual = x
 

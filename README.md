@@ -3,7 +3,7 @@
   A foundation model for raw nanopore signal through discrete tokenization
 </h2>
 
-[![bioRxiv](https://img.shields.io/badge/bioRxiv-TBA-green)]()
+[![bioRxiv](https://img.shields.io/badge/bioRxiv-2026.11.05.764536-green)](https://www.biorxiv.org/content/10.64898/2026.11.05.764536v1)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/guangzhaocs/Brieno/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/brieno)](https://pypi.org/project/brieno/)
@@ -60,8 +60,20 @@ See the [training guide](docs/training.md).
 
 ## Citation
 
-Citation details will be added once the manuscript is available. Until then, please
-refer to this repository.
+Cheng, G. and Pitkänen, E. (2026). Towards a foundation model for raw nanopore signal
+through discrete tokenization. *bioRxiv* 2026.11.05.764536.
+<https://doi.org/10.64898/2026.11.05.764536>
+
+```bibtex
+@article{cheng2026brieno,
+  title   = {Towards a foundation model for raw nanopore signal through discrete tokenization},
+  author  = {Cheng, Guangzhao and Pitk{\"a}nen, Esa},
+  journal = {bioRxiv},
+  year    = {2026},
+  doi     = {10.64898/2026.11.05.764536},
+  url     = {https://www.biorxiv.org/content/10.64898/2026.11.05.764536v1}
+}
+```
 
 ## License
 
