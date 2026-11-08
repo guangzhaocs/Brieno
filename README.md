@@ -27,10 +27,10 @@ multiple downstream tasks.
 
 With frozen or fine-tuned features, the model:
 
-- identifies **species** without requiring reference genomes;
-- outperforms Dorado in **native-barcode demultiplexing**;
-- matches Dorado's **basecalling** performance on bacteriophage lambda;
-- approaches Dorado's specialized model on **DNA methylation** calling.
+- identifies **species** without requiring reference genomes at inference time;
+- achieves higher overall accuracy than Dorado in **native-barcode demultiplexing**;
+- approaches Dorado’s **basecalling** performance across six genomes;
+- achieves a higher read-level AUROC than Dorado’s 5mC model for **CpG methylation detection**.
 
 ## Name origin
 
