@@ -36,13 +36,13 @@ raw FAST5/POD5
       ▼
   token transformer
       │
-      │  task fine-tuning
+      │  brieno train classify
       ▼
-  basecalling / demux / species / modification heads
+  demultiplexing / species heads
 ```
 
-Everything up to a pretrained transformer is here. Fine-tuning a task head is being
-prepared for a later release; until then the task models are published as weights.
+Basecalling and modification heads are fine-tuned by commands of their own, which are
+being prepared; the two classification tasks share one command and are here.
 
 ---
 
@@ -331,8 +331,104 @@ What to watch in `history.jsonl`:
 
 ---
 
-## 6. Fine-tune a task head
+## 6. Fine-tune a classification head
 
-Not yet implemented in this package. The released task models (basecalling,
-demultiplexing, species, modifications) are published as trained weights; the
-fine-tuning code that produced them is being prepared for a later release.
+Barcode demultiplexing and species identification are the same problem — label a read
+from its signal — so they are the same command. The number of classes comes from the
+dataset, and nothing in the code knows which task it is running:
+
+```bash
+brieno train classify -r /data/barcodes --setting setting1 -f 1 \
+    -m dna_r9.4.1_tokenizer@v1.0/tokenizer.pt \
+    -t dna_r9.4.1_token_tf_pretrained@v1.0/transformer.pt \
+    --heads C2 --task-name demux -o runs/
+```
+
+### The dataset
+
+```
+<root>/meta/<class>/<run>/chunks/chunks_part0000.npy   (N, 1, 16384) float16
+                         chunks/chunk_index.npy        (N, 3) int32
+<root>/<setting>/labels.json                           {"classes": [...]}
+<root>/<setting>/fold<k>/{train,val,test}.tsv          one row per run
+```
+
+Splits are stored as **indices, never as copies of the signal**: a fold says which
+chunks of which runs belong to it, so one set of chunk files serves every fold and a
+new split costs a table rather than a dataset.
+
+Hold out whole **runs**, not reads. Reads from one flow cell share its pore ageing,
+its temperature and its particular batch of chemistry, so a model that has seen any
+read of a run has seen most of what distinguishes that run. A within-run split
+measures how well the model memorised the run; a leave-run-out split measures what
+you actually want to know.
+
+### Choosing a head
+
+Each head sees a different representation and is otherwise identical — the same
+`ChunkHead`, the same data, the same schedule. That is what makes the comparison
+mean something.
+
+| head | input | needs `--transformer` |
+|---|---|---|
+| `A` | the tokenizer's continuous encoder latent | no |
+| `B1` | the quantized latent | no |
+| `B2` | token ids alone, through a learned embedding | no |
+| `C1` | token ids through the pretrained transformer, frozen | yes |
+| `C2` | the same, with the transformer fine-tuned | yes |
+| `D1` | the encoder architecture trained from scratch on the task | no |
+
+`C2` is usually the most accurate and `C1` close behind, but `C1` has a property `C2`
+does not: its transformer is unchanged, so every `C1` head in existence shares one
+front-end and several tasks can run in a single pass over the reads. `D1` is the
+control — same encoder shape, no tokenizer, no transformer, no pretraining — and is
+what any claim about the value of pretraining has to be measured against.
+
+Several heads can share one job, which computes the frozen front-end once for all of
+them:
+
+```bash
+brieno train classify ... --heads A,B1,B2,C1
+```
+
+`C1` and `C2` cannot: `C2` fine-tunes the transformer that `C1` must see frozen, so
+running them together would quietly contaminate the frozen head while every metric
+still looked reasonable. The command refuses rather than letting that happen.
+
+### Training
+
+Classes in these datasets differ in size by an order of magnitude — a run yields as
+many chunks as it has reads — so each epoch draws `--per-class` chunks from every
+class rather than sampling the natural distribution. An epoch is therefore a fixed
+amount of work, comparable between datasets.
+
+`--lr` sets the head's learning rate and `--tf-lr` the transformer's when `C2` is
+fine-tuning. They are deliberately different: the transformer arrives pretrained and
+the head does not, and a head-sized step applied to the transformer undoes what
+pretraining established. The schedule is one-cycle over the whole run.
+
+`--resume <last.pt>` continues an interrupted run. The checkpoint carries the random
+state as well as the weights, so a resumed run draws the epoch it is actually on
+instead of replaying the first one — with a per-class sampler, replaying means
+training on the same chunks again and again while the loss curve looks healthy.
+
+### Output
+
+```
+<out-root>/<task-name>_<heads>/<run name>/
+    history.jsonl        per-epoch loss and validation accuracy
+    best_<head>.pt       the epoch with the best validation accuracy, per head
+    last.pt              resume point
+    metrics.json         test-set results
+    per_read_<head>.tsv.gz   one row per read: true and predicted class
+```
+
+`metrics.json` reports the test split at chunk level and at read level, the latter
+under several aggregations. Which one is right depends on the task: a native barcode
+sits in the first chunk of a read, so `read_acc_first1_mean_logp` is the honest number
+there, while a species call may use the whole read and `read_acc_mean_logp` is the one
+to quote. All of them are reported so the choice stays visible rather than buried.
+
+Per-class recall and the confusion matrix are included, as is per-run recall — a model
+that is excellent on average and poor on one run is a model that has learned something
+about the runs rather than the classes.
