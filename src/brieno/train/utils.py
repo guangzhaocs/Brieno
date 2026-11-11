@@ -17,6 +17,9 @@ __all__ = [
     "autocast",
     "grad_scaler",
     "JsonlLogger",
+    "rng_state",
+    "restore_rng_state",
+    "load_checkpoint",
 ]
 
 
@@ -96,3 +99,57 @@ class JsonlLogger:
             return
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
+
+
+def rng_state():
+    """Every random generator a training run draws from, in a form a checkpoint can hold.
+
+    A resumed run must continue the random streams, not restart them: a fresh process
+    re-seeds from the run's seed, so without this every resume replays the data order
+    from the top of the run, and a run split into short segments sees the same chunks
+    again and again.
+
+    Only tensors and plain Python types are stored. ``np.random.get_state()`` contains an
+    array, which ``torch.load`` refuses to read back under its ``weights_only`` default
+    (torch >= 2.6), so it is converted here rather than discovered on the first resume.
+    """
+    ns = np.random.get_state()
+    version, internal, gauss = random.getstate()
+    state = {
+        "torch": torch.get_rng_state(),
+        "numpy": [ns[0], [int(x) for x in ns[1]], int(ns[2]), int(ns[3]), float(ns[4])],
+        "python": [version, list(internal), gauss],
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state):
+    """Inverse of :func:`rng_state`. Generators missing from ``state`` are left alone."""
+    if "torch" in state:
+        torch.set_rng_state(state["torch"].cpu())
+    if "numpy" in state:
+        ns = state["numpy"]
+        np.random.set_state((ns[0], np.asarray(ns[1], dtype=np.uint32), int(ns[2]),
+                             int(ns[3]), float(ns[4])))
+    if "python" in state:
+        version, internal, gauss = state["python"]
+        random.setstate((version, tuple(internal), gauss))
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([t.cpu() for t in state["cuda"]])
+
+
+def load_checkpoint(path, map_location="cpu"):
+    """``torch.load`` for a checkpoint one of the trainers wrote.
+
+    Tries the safe loader first. A checkpoint written before :func:`rng_state` existed
+    may hold a numpy array, which the safe loader rejects; it is the user's own file, so
+    it is then read the permissive way instead of being declared unusable.
+    """
+    import pickle
+
+    try:
+        return torch.load(path, map_location=map_location)
+    except pickle.UnpicklingError:
+        return torch.load(path, map_location=map_location, weights_only=False)

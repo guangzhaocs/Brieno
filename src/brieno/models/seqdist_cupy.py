@@ -1,19 +1,19 @@
 """
-Drop-in replacement for the `koi.ctc` CUDA functions on platforms without an `ont-koi` wheel (e.g. the
-GH200 / aarch64 nodes of Roihu), built on cupy run-time-compiled kernels.
+Drop-in replacement for the `koi.ctc` CUDA functions on platforms without an `ont-koi` wheel (e.g.
+aarch64 GPU nodes), built on cupy run-time-compiled kernels.
 
 Provenance: `koi.ctc` (ONT, closed CUDA binary) is a renamed copy of David Page's open-source `seqdist`
 (MIT, https://github.com/davidcpage/seqdist, v0.0.3) — same `LogZ` autograd class, same kernel names
 (`fwd_bwd_logspace`, `logZ_fwd`, `fwd_scores`, `bwd_scores`), same `Log` / `Max` semirings.  The CUDA
 sources below are seqdist's `cuda/ctc_simple.cu` and `cuda/sparse_logZ.cu` verbatim; the python glue is
-seqdist's with koi's argument conventions (K=1, fp32), so `brieno/models/koi_crf.py` can import
+seqdist's with koi's argument conventions (K=1, fp32), so `brieno/models/crf.py` can import
 either backend unchanged.  Kernels are compiled by cupy/nvrtc at first use for whatever GPU is present
 (no pre-built binary -> no aarch64 problem) and launched on torch's current CUDA stream.
 
 Exports (koi.ctc names): semiring, Log, Max, grad, SequenceDist, logZ_cu, viterbi_alignments,
                          fwd_scores_cu_sparse, bwd_scores_cu_sparse, logZ_fwd_cu, logZ_cu_sparse
-Not provided: koi.decode.beam_search (closed C++/CUDA beam search) -> use CTC_CRF.viterbi for decoding
-              on this backend and run the dorado-style beam-search evaluation on Triton with real koi.
+Not provided: koi.decode.beam_search (closed C++/CUDA beam search) -> decode with
+              crf_fcd_beam_decode or crf_viterbi_decode (brieno/models/crf.py) on this backend.
 """
 from collections import namedtuple
 from functools import lru_cache

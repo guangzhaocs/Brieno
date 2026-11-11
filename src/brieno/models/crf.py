@@ -1,7 +1,7 @@
 """
-CTC-CRF sequence distribution on top of ONT's `koi` CUDA kernels — the decoder Dorado /
-Bonito use (bonito.crf.model.CTC_CRF, ONT Public License 1.0; re-implemented here so the
-brieno basecalling heads can share exactly the same loss, scoring layout and beam search).
+CTC-CRF sequence distribution, the output layer Dorado and Bonito use
+(bonito.crf.model.CTC_CRF, ONT Public License 1.0; re-implemented here so the Brieno
+basecalling heads share exactly the same loss, scoring layout and beam search).
 
 Layout (identical to bonito):  scores [T, N, C] with C = (n_base + 1) * n_base**state_len.
   Reshaped as [T, N, n_states, n_base + 1]: column 0 = stay in state s (blank), column 1 + a =
@@ -9,20 +9,24 @@ Layout (identical to bonito):  scores [T, N, C] with C = (n_base + 1) * n_base**
   The emitted base of a move into s is its newest base (s % n_base).
 
 Loss  = -logZ_target / |target| after GLOBAL normalisation (scores - logZ_all / T), both logZ
-        computed by koi's fused forward/backward lattice kernels (fp32 only).
-Decode: koi.decode.beam_search (fp16 scores [N, T, C], beam 32, beam_cut 100, blank_score 2.0)
-        -> per-frame sequence / qstring / moves, exactly what dorado stitches.
+        computed by fused forward/backward lattice kernels on the GPU (fp32 only).
+Decode: three decoders, in decreasing order of fidelity to Dorado:
+        crf_beam_decode      koi.decode.beam_search (fp16 scores [N, T, C], beam 32,
+                             beam_cut 100, blank_score 2.0) -> per-frame sequence / qstring /
+                             moves, exactly what Dorado stitches. Needs the `ont-koi` wheel.
+        crf_fcd_beam_decode  fast_ctc_decode.crf_beam_search (open-source Rust, CPU) on the
+                             posterior transition probabilities. Runs anywhere.
+        crf_viterbi_decode   best path, no beam.
 
 Dorado R9.4.1 sup settings: state_len 5, LinearCRF tanh x scale 5.0, blank_score 2.0 fixed.
-The pure-PyTorch reference `brieno/models/crf_basecaller.py` uses the same layout and is
-used to parity-test these kernels (tmp/koi_smoke/koi_smoke.py).
-Backend: `koi.ctc` when the ont-koi wheel is installed (Triton, x86_64), otherwise the cupy port of the same
-open-source seqdist kernels in `brieno/models/seqdist_cupy.py` (Roihu, aarch64); `BACKEND` says which.
-Only koi has a GPU beam search; on the cupy backend decode with `crf_fcd_beam_decode` /
-`crf_fcd_frames` (fast_ctc_decode.crf_beam_search, open-source Rust, CPU) or `crf_viterbi_decode`.
-fcd beam 32 is 99.7% per-base identical to koi beam and ~0.09 NW lower at chunk level, so numbers
-decoded with it are comparable with each other and conservative against an external basecaller,
-but must NOT be put in the same column as koi-decoded numbers.
+
+Backend (`BACKEND` says which): `koi.ctc` when the `ont-koi` wheel is installed (x86_64
+only), otherwise the cupy port of the same open-source seqdist kernels in
+`brieno/models/seqdist_cupy.py`, which compiles at run time on any CUDA platform.
+
+The fast_ctc_decode beam at width 32 agrees with the koi beam on 99.7 % of bases and scores
+about 0.09 points lower in chunk-level identity. Numbers decoded with one are comparable
+with each other; numbers decoded with different decoders must not share a column.
 """
 import numpy as np
 import torch
@@ -180,8 +184,9 @@ def crf_beam_decode(scores_TNC, beam_width=32, beam_cut=100.0, scale=1.0, offset
     koi needs fp16, contiguous, layout [N, T, 4**(L+1)] WITHOUT the blank column, on a CUDA device with an explicit index."""
     try:
         from koi.decode import beam_search as koi_beam_search, to_str as koi_to_str
-    except ImportError as e:   # closed-source; no aarch64 wheel -> decode with crf_viterbi_decode here, beam search on Triton
-        raise ImportError("koi.decode.beam_search unavailable on this platform (BACKEND=%s); use crf_viterbi_decode" % BACKEND) from e
+    except ImportError as e:   # closed-source, x86_64 wheel only
+        raise ImportError("koi.decode.beam_search is unavailable on this platform (BACKEND=%s); "
+                          "use crf_fcd_beam_decode or crf_viterbi_decode" % BACKEND) from e
     scores = strip_blank_column(scores_TNC).transpose(0, 1).to(torch.float16).contiguous()
     seq, qs, mv = koi_beam_search(scores, beam_width=beam_width, beam_cut=beam_cut, scale=scale,
                                   offset=offset, blank_score=blank_score)
@@ -212,13 +217,12 @@ def crf_transition_probs(seqdist: CTC_CRF, scores_TNC, betas=None):
 @torch.no_grad()
 def crf_fcd_beam_decode(seqdist: CTC_CRF, scores_TNC, beam_size=32, beam_cut=0.0, threads=8, with_path=False):
     """CRF beam search with fast_ctc_decode.crf_beam_search (open-source Rust, CPU; x86_64 + aarch64 wheels) on the
-    bonito posterior transition probabilities. Used on Roihu where koi.decode is unavailable; Triton keeps koi beam.
+    bonito posterior transition probabilities. The decoder to use where koi.decode is unavailable.
 
-    with_path=False -> list of decoded strings (chunk-level: train.py / eval_chunks).
-    with_path=True  -> list of (seq, path); `path` is one FRAME INDEX per emitted base, strictly increasing in [0,T)
-                       (verified 2026-10-25, tmp/crf_cupy/fcd_path_probe.py: rebuilding a [T] per-frame array with
-                       arr[path] = bases and collapsing on `!= 0` reproduces seq byte for byte).  Read-level stitching
-                       (infer_reads.py) happens in frame space, so it needs this."""
+    with_path=False -> list of decoded strings (chunk-level scoring).
+    with_path=True  -> list of (seq, path); `path` is one FRAME INDEX per emitted base, strictly increasing in [0,T):
+                       rebuilding a [T] per-frame array with arr[path] = bases and collapsing on `!= 0` reproduces
+                       seq byte for byte. Read-level stitching happens in frame space, so it needs this."""
     from concurrent.futures import ThreadPoolExecutor
     from fast_ctc_decode import crf_beam_search
     trans, init = crf_transition_probs(seqdist, scores_TNC)
@@ -234,11 +238,11 @@ def crf_fcd_beam_decode(seqdist: CTC_CRF, scores_TNC, beam_size=32, beam_cut=0.0
 def crf_fcd_frames(seqdist: CTC_CRF, scores_TNC, beam_size=32, beam_cut=0.0, threads=8):
     """fcd CRF beam search returned in koi.decode.beam_search's PER-FRAME layout: (seq, qstring) int8 [N, T].
 
-    koi gives (seq, qstring, moves) per frame and infer_reads stitches those across overlapping chunks before
-    collapsing with `seq != 0`.  fcd gives (string, frame-index-per-base) instead, so scatter the bases back onto
-    the frame axis.  fcd has no calibrated q-scores -> the qstring is a constant fill, exactly as the CTC read-level
-    path already does ("+"); eval_reads scores the SEQUENCE only, so this does not affect any reported number, but
-    the quality column of the emitted fastq is meaningless and must not be used."""
+    koi gives (seq, qstring, moves) per frame, and read-level inference stitches those across overlapping chunks
+    before collapsing with `seq != 0`.  fcd gives (string, frame-index-per-base) instead, so scatter the bases back
+    onto the frame axis.  fcd has no calibrated q-scores -> the qstring is a constant fill ("+"): accuracy is scored
+    on the SEQUENCE only, so no reported number is affected, but the quality column of a fastq written from this
+    decoder is meaningless and must not be used."""
     import numpy as np
     T = int(scores_TNC.shape[0])
     out = crf_fcd_beam_decode(seqdist, scores_TNC, beam_size=beam_size, beam_cut=beam_cut, threads=threads, with_path=True)

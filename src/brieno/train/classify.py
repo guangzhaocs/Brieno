@@ -28,7 +28,7 @@ from brieno.downstream.data import (BalancedSampler, ChunkDataset, PartIterDatas
 from brieno.downstream.features import (FrozenFeatures, context_input,
                                         load_transformer, transformer_hidden)
 from brieno.downstream.heads import Heads, RawEncoder
-from brieno.train.utils import JsonlLogger
+from brieno.train.utils import JsonlLogger, load_checkpoint, restore_rng_state, rng_state
 
 __all__ = ["ALL_HEADS", "make_features", "evaluate", "read_level", "finetune"]
 
@@ -205,8 +205,14 @@ def finetune(root, setting, fold, tokenizer_ckpt, transformer_ckpt=None, heads=(
     classes = labels["classes"]
     n_classes = len(classes)
 
-    name = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(out_root, f"{task_name}_{'+'.join(heads)}", name)
+    if resume:
+        # A resumed run continues in the directory it was started in: the best
+        # checkpoint so far and the history live there, and a fresh directory would
+        # start without either.
+        out_dir = os.path.dirname(os.path.abspath(resume))
+    else:
+        name = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(out_root, f"{task_name}_{'+'.join(heads)}", name)
     os.makedirs(out_dir, exist_ok=True)
     history = JsonlLogger(os.path.join(out_dir, "history.jsonl"))
     print(f"writing to {out_dir}")
@@ -267,7 +273,7 @@ def finetune(root, setting, fold, tokenizer_ckpt, transformer_ckpt=None, heads=(
     start_epoch = 1
     best = {h: (-1.0, None) for h in heads}
     if resume:
-        state = torch.load(resume, map_location=device)
+        state = load_checkpoint(resume, map_location=device)
         model.load_state_dict(state["model"])
         opt.load_state_dict(state["opt"])
         sched.load_state_dict(state["sched"])
@@ -277,8 +283,7 @@ def finetune(root, setting, fold, tokenizer_ckpt, transformer_ckpt=None, heads=(
             raw.load_state_dict(state["raw"])
         start_epoch = state["epoch"] + 1
         best = {h: tuple(v) for h, v in state["best"].items()}
-        torch.set_rng_state(state["rng"]["torch"])
-        np.random.set_state(state["rng"]["numpy"])
+        restore_rng_state(state["rng"])
         print(f"resumed from {resume} at epoch {state['epoch']}")
 
     trainable = ([p for p in model.parameters() if p.requires_grad]
@@ -334,7 +339,7 @@ def finetune(root, setting, fold, tokenizer_ckpt, transformer_ckpt=None, heads=(
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                     "sched": sched.state_dict(), "epoch": epoch,
                     "best": {h: list(v) for h, v in best.items()},
-                    "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state()},
+                    "rng": rng_state(),
                     **({"tf": tf.state_dict()} if tf_train else {}),
                     **({"raw": raw.state_dict()} if raw is not None else {})},
                    os.path.join(out_dir, "last.pt"))
