@@ -18,6 +18,7 @@ Two layers, split by audience:
       brieno train encode     signal chunks -> token ids
       brieno train transformer  pretrain the token transformer
       brieno train classify     fine-tune a classification head
+      brieno train basecall     fine-tune a basecalling head
 
 Subcommands are registered here but their implementations are imported lazily, so
 ``brieno --help`` does not pay for importing torch.
@@ -301,7 +302,8 @@ def _add_train_classify(subparsers):
     p.add_argument("--task-name", default="classify",
                    help="output directory prefix, e.g. demux or species")
     p.add_argument("-n", "--run-name", default=None, metavar="NAME")
-    p.add_argument("--resume", default=None, metavar="CKPT", help="continue from a last.pt")
+    p.add_argument("--resume", default=None, metavar="CKPT",
+                   help="continue from a last.pt, in the directory it is in")
     g = p.add_argument_group("training")
     g.add_argument("--epochs", type=int, default=12)
     g.add_argument("--per-class", type=int, default=50000, help="chunks drawn per class per epoch")
@@ -336,6 +338,66 @@ def _run_train_classify(args):
     return 0
 
 
+# ----------------------------------------------------------- brieno train basecall
+def _add_train_basecall(subparsers):
+    p = subparsers.add_parser(
+        "basecall",
+        help="fine-tune a basecalling head",
+        description=(
+            "Train a basecalling head on top of the pretrained model: a fixed sequence "
+            "back-end with the CTC-CRF output layer of Dorado and Bonito, trained on signal "
+            "chunks paired with the reference bases they align to. Heads differ only in "
+            "what is fed to them, with the same letters as 'brieno train classify': A "
+            "continuous latent, B1 quantized latent, B2 token ids, C1 the frozen "
+            "transformer, C2 the transformer fine-tuned, D1 the encoder architecture "
+            "trained from scratch. Needs a GPU."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-c", "--config", required=True, metavar="JSON",
+                   help="data, head and training recipe (see configs/basecall_dna_r9.json)")
+    p.add_argument("-m", "--tokenizer", required=True, metavar="CKPT")
+    p.add_argument("-t", "--transformer", default=None, metavar="CKPT",
+                   help="required for heads C1 and C2")
+    p.add_argument("--heads", default="C2",
+                   help="comma-separated: A,B1,B2,C1,C2,D1 (C1 and C2 cannot share a job)")
+    p.add_argument("-n", "--run-name", default=None, metavar="NAME",
+                   help="output subdirectory under training.save_dir [default: a timestamp]")
+    p.add_argument("--resume", default=None, metavar="CKPT",
+                   help="continue from a last.pt, in the directory it is in")
+    p.add_argument("-s", "--seed", type=int, default=None, help="[default: training.seed]")
+    p.add_argument("--decoder", default="auto", choices=["auto", "koi", "fcd", "viterbi"],
+                   help="CRF decoder used for scoring; auto takes the best one installed. "
+                        "Numbers from different decoders are not comparable")
+    p.add_argument("--transformer-random", action="store_true",
+                   help="keep the transformer architecture but not its weights: the "
+                        "no-pretraining control for C1 or C2")
+    p.add_argument("--smoke", type=int, default=0, metavar="N",
+                   help="run N batches per epoch and per evaluation: checks the "
+                        "installation and the data, produces no usable model")
+    g = p.add_argument_group("config overrides (leave unset to use the config file)")
+    g.add_argument("--lr", type=float, default=None)
+    g.add_argument("--batch-size", type=int, default=None)
+    g.add_argument("--epochs", type=int, default=None)
+    p.set_defaults(func=_run_train_basecall)
+
+
+def _run_train_basecall(args):
+    from brieno.train.basecall import finetune_basecaller
+
+    overrides = [
+        ("training", "lr", args.lr),
+        ("training", "batch_size", args.batch_size),
+        ("training", "epochs", args.epochs),
+    ]
+    finetune_basecaller(args.config, args.tokenizer, transformer_ckpt=args.transformer,
+                        heads=[h.strip() for h in args.heads.split(",") if h.strip()],
+                        run_name=args.run_name, resume=args.resume, seed=args.seed,
+                        overrides=overrides, decoder=args.decoder,
+                        transformer_random=args.transformer_random, smoke=args.smoke)
+    return 0
+
+
 # ------------------------------------------------------------------- brieno train
 def _add_train(subparsers):
     p = subparsers.add_parser(
@@ -352,6 +414,7 @@ def _add_train(subparsers):
     _add_train_encode(sub)
     _add_train_transformer(sub)
     _add_train_classify(sub)
+    _add_train_basecall(sub)
     p.set_defaults(func=_print_help_and_fail(p))
     return p
 
@@ -382,10 +445,10 @@ def main(argv=None):
         print("\nbrieno: interrupted", file=sys.stderr)
         return 130
     except (FileNotFoundError, FileExistsError, IsADirectoryError, NotADirectoryError,
-            PermissionError, ValueError, KeyError) as exc:
+            PermissionError, ValueError, KeyError, ImportError) as exc:
         # Expected, actionable failures: a bad path, a malformed config, a mismatched
-        # shard. Report them as a message, not as a traceback; anything else is a bug
-        # and keeps its traceback.
+        # shard, an optional dependency that is not installed. Report them as a message,
+        # not as a traceback; anything else is a bug and keeps its traceback.
         print(f"brieno: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 

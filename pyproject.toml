@@ -33,6 +33,8 @@ fast5 = ["ont-fast5-api>=4.0"]
 pod5 = ["pod5>=0.3"]
 # CRF beam search on CPU (open-source Rust; x86_64 and aarch64 wheels).
 decode = ["fast-ctc-decode>=0.3"]
+# Chunk-level basecalling identity. Without it the metric falls back to edlib.
+align = ["parasail>=1.3"]
 # CRF loss / Viterbi need a CUDA backend. `ont-koi` ships x86_64 wheels only;
 # `cupy` builds the same seqdist kernels at run time on any CUDA platform.
 cuda = ["cupy>=12"]

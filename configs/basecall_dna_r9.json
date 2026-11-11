@@ -1,0 +1,56 @@
+{
+  "_comment": "Recipe of the released R9.4.1 basecalling models: the head, the training mix and the schedule of the configuration benchmarked against other basecallers. Point datasets.root_dir at a directory of basecalling chunk datasets (see docs/training.md) and training.save_dir at where runs should be written.",
+  "datasets": {
+    "root_dir": "/path/to/basecalling_chunks",
+    "train": [
+      { "name": "Saureus_Native_R9_PRJEB51164", "weight": 0.10 },
+      { "name": "Ecoli_Unmethylated_R9_Zenodo7970715", "weight": 0.40 },
+      { "name": "StreptomycesS6_Native_R9_PRJNA514949", "weight": 0.16 },
+      { "name": "Hsapiens_Native_R9_HG001", "weight": 0.34 }
+    ],
+    "validation": [
+      "Lambda_Native_R9_PRJNA926802",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07162",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07165",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07506"
+    ],
+    "validation_chunks": 2000,
+    "test": [
+      "Lambda_Native_R9_PRJNA926802",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07162",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07165",
+      "Hsapiens_Native_R9_HG002ONT202011/PAG07506"
+    ],
+    "test_chunks": 20000,
+    "subset_seed": 42,
+    "max_ref_len": 2047
+  },
+  "head": {
+    "d": 512,
+    "lstm_hidden": 512,
+    "n_lstm": 5,
+    "dropout": 0.0,
+    "state_len": 5,
+    "crf_scale": 5.0,
+    "blank_score": 2.0
+  },
+  "decode": {
+    "beam_width": 32
+  },
+  "training": {
+    "save_dir": "/path/to/runs",
+    "batch_size": 32,
+    "eval_batch_size": 64,
+    "epochs": 120,
+    "epoch_chunks": 50000,
+    "lr": 5e-4,
+    "transformer_lr": 5e-5,
+    "weight_decay": 0.01,
+    "warmup_steps": 1000,
+    "grad_clip": 2.0,
+    "betas": [0.9, 0.98],
+    "eps": 1e-6,
+    "num_workers": 8,
+    "seed": 42
+  }
+}

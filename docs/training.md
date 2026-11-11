@@ -36,13 +36,14 @@ raw FAST5/POD5
       ▼
   token transformer
       │
-      │  brieno train classify
-      ▼
-  demultiplexing / species heads
+      ├── brieno train classify ──▶  demultiplexing / species heads
+      │
+      └── brieno train basecall ──▶  basecalling head
 ```
 
-Basecalling and modification heads are fine-tuned by commands of their own, which are
-being prepared; the two classification tasks share one command and are here.
+The two classification tasks share one command; basecalling has its own, because its
+head emits a sequence rather than a label. The modification head is fine-tuned by a
+command that is being prepared.
 
 The transformer can also be pretrained on the tokenizer's continuous latent instead of
 its tokens, which drops the `encode` step; see
@@ -61,8 +62,10 @@ pip install -e ".[fast5,pod5]"
 `fast5` and `pod5` are separate extras because most people have data in one format
 only. Install just the one you need, or both.
 
-Training needs a CUDA GPU. The CRF parts of the downstream tasks additionally need
-`ont-koi` (x86_64) or `cupy` (any CUDA platform) — not required for the tokenizer.
+Training needs a CUDA GPU. Basecalling additionally needs a CUDA backend for the CRF
+loss and benefits from two more packages; see
+[step 7](#7-fine-tune-a-basecalling-head). None of that is required for the tokenizer,
+the transformer or the classification heads.
 
 ---
 
@@ -463,8 +466,8 @@ fine-tuning. They are deliberately different: the transformer arrives pretrained
 the head does not, and a head-sized step applied to the transformer undoes what
 pretraining established. The schedule is one-cycle over the whole run.
 
-`--resume <last.pt>` continues an interrupted run. The checkpoint carries the random
-state as well as the weights, so a resumed run draws the epoch it is actually on
+`--resume <last.pt>` continues an interrupted run, in the directory the checkpoint is
+in. The checkpoint carries the random state as well as the weights, so a resumed run draws the epoch it is actually on
 instead of replaying the first one — with a per-class sampler, replaying means
 training on the same chunks again and again while the loss curve looks healthy.
 
@@ -488,3 +491,169 @@ to quote. All of them are reported so the choice stays visible rather than burie
 Per-class recall and the confusion matrix are included, as is per-run recall — a model
 that is excellent on average and poor on one run is a model that has learned something
 about the runs rather than the classes.
+
+---
+
+## 7. Fine-tune a basecalling head
+
+A basecalling head turns a chunk of signal into the bases it contains. It is trained
+on chunks paired with the stretch of reference they align to, and it ends in the same
+CTC-CRF output layer, loss and beam search as Dorado and Bonito, so that a difference
+in accuracy comes from what is underneath the output layer and not from how sequences
+are scored.
+
+```bash
+pip install -e ".[decode,align,cuda]"     # see "What to install" below
+
+brieno train basecall -c configs/basecall_dna_r9.json \
+    -m dna_r9.4.1_tokenizer@v1.0/tokenizer.pt \
+    -t dna_r9.4.1_token_tf_pretrained@v1.0/transformer.pt \
+    --heads C2 -n my_run
+```
+
+`--smoke 5` runs five batches of everything and exits. Use it first: it tells you in a
+minute whether the data, the weights and the CRF backend are in order, which a real
+run tells you only after it has loaded the whole corpus.
+
+### The data
+
+```
+<root>/<dataset>/<run>/manifest.json
+                       chunks_0000.signal.npy       (N, 1, 16384) float16
+                       chunks_0000.refs_label.npy   (N, max_len) int8   0 = pad, 1..4 = ACGT
+                       chunks_0000.refs_len.npy     (N,) int32
+```
+
+`manifest.json` lists the shards under `"files"`; each entry gives `signal_file`,
+`refs_label_file`, `refs_len_file` and `n_chunks`. A dataset is a directory of runs,
+and the config names datasets (or single runs, as `<dataset>/<run>`) relative to
+`datasets.root_dir`.
+
+The signal is normalised and chunked exactly as for pretraining. The label of a chunk
+is the piece of **reference** its signal aligns to — obtained by aligning each read to
+its genome at signal level and cutting the alignment at the chunk boundaries — and not
+the output of another basecaller. Training on a basecaller's calls teaches its errors
+along with its skill, and caps the student at the teacher.
+
+`max_ref_len` drops chunks with more bases than the head can emit. The CRF needs at
+least one output frame per base; at 4096 frames per chunk the limit of 2047 leaves two.
+
+As with the classification tasks, hold out whole **runs**. The released recipe
+validates and tests on runs — and, for the human sets, on a different individual —
+that appear nowhere in training. Its validation and test subsets are drawn from the
+same held-out runs, so the epoch that is kept was chosen with those runs in view; the
+test numbers are a fair comparison between heads trained this way, and a slightly
+generous estimate for a run the model has never been selected on.
+
+### The head
+
+Every head is the same back-end on a different representation, and the letters mean
+what they mean in [step 6](#choosing-a-head):
+
+```
+features [B, L, D]
+   │  Linear(D → d)
+   │  transposed convolutions up to 4 samples per output frame
+   │  bidirectional LSTM, n_lstm layers × lstm_hidden
+   ▼
+CRF output layer   Linear → 4^(state_len + 1) scores per frame, tanh × crf_scale
+```
+
+The output rate is fixed at one frame per four samples whatever the tokenizer's
+stride, so a 16384-sample chunk always gives 4096 frames: the 8× tokenizer is
+upsampled 2×, a 16× one 4×. Dorado's R9.4.1 models use five samples per frame.
+
+The **`head`** section of the config holds the configuration that was benchmarked
+against other basecallers, and these are also the defaults in the code:
+
+| key | value | |
+|---|---|---|
+| `d` | 512 | width after the projection and through the upsampling |
+| `lstm_hidden` | 512 | per direction |
+| `n_lstm` | 5 | |
+| `dropout` | 0.0 | |
+| `state_len` | 5 | CRF state = the last five bases, as in Dorado's sup models |
+| `crf_scale`, `blank_score` | 5.0, 2.0 | as in Dorado |
+
+That back-end has 35 M parameters. It is deliberately larger than a head needs to be
+for comparing representations: widening it from 256 to 512 raised chunk identity by
+about 0.8 points on each representation it was tried on, so the head worth shipping
+is not the smallest one that ranks the inputs correctly. `n_lstm: 0` removes the
+sequence model altogether, leaving the head no context of its own.
+
+### The recipe
+
+**`datasets`** — `train` is a weighted mixture, sampled with replacement, so the mix
+is what you set and not what the corpus sizes happen to be. `validation` and `test`
+are fixed subsets (`validation_chunks`, `test_chunks`, drawn once with `subset_seed`):
+they must be the same chunks at every epoch, in every run and on every machine, or
+their scores stop being comparable.
+
+**`training`** — an epoch is `epoch_chunks` chunks, so its length does not depend on
+the size of the corpus. `lr` is the head's learning rate and `transformer_lr` the
+transformer's when `C2` fine-tunes it, ten times smaller for the same reason as in
+step 6. The schedule is a linear warm-up multiplied by a cosine over the whole run.
+Gradients are clipped per head (`grad_clip`), so one head's bad batch cannot scale
+another's update when several share a job.
+
+The head and the transformer run in **fp32**. This is not caution: the CRF loss
+normalises over every path through the lattice, and under bf16 the same head loses
+more than two points of identity. Only the frozen tokenizer encoder uses bf16, where
+the GPU supports it.
+
+The checkpoint kept for each head is the epoch with the best **mean** identity over
+all validation sets. Selecting on one set picks the epoch that happens to suit that
+set; the mean is harder to flatter.
+
+`--resume <last.pt>` continues an interrupted run in the directory the checkpoint is
+in, random state included, so the data stream carries on from where it stopped
+instead of replaying the first epochs.
+
+### What to install
+
+| extra | package | what it is for |
+|---|---|---|
+| `cuda` | `cupy` | the CRF loss, on any CUDA platform |
+| — | `ont-koi` | the same kernels and Dorado's GPU beam search; x86_64 wheels only, install it yourself |
+| `decode` | `fast-ctc-decode` | CRF beam search on the CPU, everywhere |
+| `align` | `parasail` | the identity metric; without it `edlib` is used, with unit costs |
+
+One of `ont-koi` and `cupy` is required. The rest decide *how* results are scored,
+and the choice is recorded in `metrics.json` because it changes the numbers:
+
+- **Decoder** (`--decoder`): `koi` is Dorado's beam search, `fcd` the open-source one,
+  `viterbi` the best path without a beam. `auto` takes the first of those that is
+  installed. At beam width 32 the two beam searches agree on 99.7 % of bases and
+  `fcd` scores about 0.09 points lower. Compare numbers only within one decoder.
+- **Metric**: identity of a global alignment scored match 2, mismatch −1, gap open 8,
+  gap extend 4 — the chunk-level metric of Pagès-Gallego & de Ridder (2023). The
+  `edlib` fallback uses unit costs and does not give the same values.
+
+### Output
+
+```
+<save_dir>/<run name>/
+    config.json         the config this run actually used
+    history.jsonl       per epoch: training loss, and every validation set's scores
+    best_<head>.pt      the epoch with the best mean validation identity
+    last.pt             for --resume
+    metrics.json        test-set scores of the kept epoch, with decoder and metric
+```
+
+`best_<head>.pt` carries the head's configuration, and for `C2` the fine-tuned
+transformer, so it can be rebuilt without the config file.
+
+What to watch:
+
+- **`nw_mean`** — mean per-chunk identity, `matches / (matches + mismatches +
+  insertions + deletions)`. This is what epochs are selected on. `nw_median` sits
+  about a point above it; the gap is the tail of chunks that go badly.
+- **`mismatch_rate` / `ins_rate` / `del_rate`** — which kind of error is left.
+- **`len_ratio`** — called length over reference length. Well below 1 means the head
+  is dropping bases, well above means it is stuttering.
+
+These are chunk-level numbers, measured on 16384-sample pieces against their own
+reference. They are the right thing to select epochs on and to compare heads with,
+but they are not read accuracy: basecalling whole reads, with chunks overlapped and
+stitched, is the job of the `brieno basecaller` command, which is being prepared.
+
