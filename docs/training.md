@@ -16,27 +16,27 @@ defaults; this guide covers the workflow and the ideas behind it, not the flag t
 ```
 raw FAST5/POD5
       │
-      │  brieno train prep              ✔ implemented
+      │  brieno train prep
       ▼
   signal chunks (.npy shards)
       │
-      │  brieno train merge             ✔ implemented
+      │  brieno train merge
       ▼
   one .npy per dataset
       │
-      │  brieno train tokenizer         ✔ implemented
+      │  brieno train tokenizer
       ▼
   signal tokenizer
       │
-      │  brieno train encode            ✔ implemented
+      │  brieno train encode
       ▼
   tokenized corpus
       │
-      │  brieno train transformer       ✔ implemented
+      │  brieno train transformer
       ▼
   token transformer
       │
-      │  task fine-tuning               ○ not yet implemented
+      │  task fine-tuning
       ▼
   basecalling / demux / species / modification heads
 ```
