@@ -17,6 +17,7 @@ Two layers, split by audience:
       brieno train tokenizer  pretrain the signal tokenizer
       brieno train encode     signal chunks -> token ids
       brieno train transformer  pretrain the token transformer
+      brieno train classify     fine-tune a classification head
 
 Subcommands are registered here but their implementations are imported lazily, so
 ``brieno --help`` does not pay for importing torch.
@@ -266,6 +267,68 @@ def _run_train_transformer(args):
     return 0
 
 
+# ----------------------------------------------------------- brieno train classify
+def _add_train_classify(subparsers):
+    p = subparsers.add_parser(
+        "classify",
+        help="fine-tune a classification head (demultiplexing, species, ...)",
+        description=(
+            "Train one or more classification heads on top of the pretrained model. The "
+            "number of classes comes from the dataset, so the same command serves barcode "
+            "demultiplexing and species identification. Heads differ only in what is fed "
+            "to them: A continuous latent, B1 quantized latent, B2 token ids, C1 tokens "
+            "through the frozen transformer, C2 the same with the transformer fine-tuned, "
+            "D1 the encoder architecture trained from scratch as the no-pretraining control."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("-r", "--root", required=True, metavar="DIR", help="dataset root")
+    p.add_argument("--setting", default="setting1", help="split directory under --root")
+    p.add_argument("-f", "--fold", type=int, required=True)
+    p.add_argument("-m", "--tokenizer", required=True, metavar="CKPT")
+    p.add_argument("-t", "--transformer", default=None, metavar="CKPT",
+                   help="required for heads C1 and C2")
+    p.add_argument("--heads", default="C1",
+                   help="comma-separated: A,B1,B2,C1,C2,D1 (C1 and C2 cannot share a job)")
+    p.add_argument("-o", "--out-root", default=".", metavar="DIR")
+    p.add_argument("--task-name", default="classify",
+                   help="output directory prefix, e.g. demux or species")
+    p.add_argument("-n", "--run-name", default=None, metavar="NAME")
+    p.add_argument("--resume", default=None, metavar="CKPT", help="continue from a last.pt")
+    g = p.add_argument_group("training")
+    g.add_argument("--epochs", type=int, default=12)
+    g.add_argument("--per-class", type=int, default=50000, help="chunks drawn per class per epoch")
+    g.add_argument("--val-chunks", type=int, default=50000)
+    g.add_argument("--batch", type=int, default=128)
+    g.add_argument("--eval-batch", type=int, default=512)
+    g.add_argument("--lr", type=float, default=5e-4, help="head learning rate")
+    g.add_argument("--tf-lr", type=float, default=5e-5,
+                   help="C2 only: a smaller rate for the pretrained transformer")
+    g.add_argument("--wd", type=float, default=0.05)
+    g.add_argument("--accum", type=int, default=1, help="gradient accumulation steps")
+    g.add_argument("-j", "--workers", type=int, default=8)
+    g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--transformer-random", action="store_true",
+                   help="keep the transformer architecture but not its weights: the "
+                        "no-pretraining control for a fine-tuned head")
+    p.set_defaults(func=_run_train_classify)
+
+
+def _run_train_classify(args):
+    from brieno.train.classify import finetune
+
+    finetune(args.root, args.setting, args.fold, args.tokenizer,
+             transformer_ckpt=args.transformer,
+             heads=[h.strip() for h in args.heads.split(",") if h.strip()],
+             out_root=args.out_root, task_name=args.task_name, run_name=args.run_name,
+             epochs=args.epochs, per_class=args.per_class, val_chunks=args.val_chunks,
+             batch=args.batch, eval_batch=args.eval_batch, lr=args.lr, tf_lr=args.tf_lr,
+             weight_decay=args.wd, accum=args.accum, workers=args.workers,
+             seed=args.seed, resume=args.resume,
+             transformer_random=args.transformer_random)
+    return 0
+
+
 # ------------------------------------------------------------------- brieno train
 def _add_train(subparsers):
     p = subparsers.add_parser(
@@ -281,6 +344,7 @@ def _add_train(subparsers):
     _add_train_tokenizer(sub)
     _add_train_encode(sub)
     _add_train_transformer(sub)
+    _add_train_classify(sub)
     p.set_defaults(func=_print_help_and_fail(p))
     return p
 
