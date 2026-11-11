@@ -6,25 +6,39 @@ from typing import List, Optional
 
 class TokenTransformerMLM(nn.Module):
     """
-    Masked Language Model for Brieno pretraining on RVQ token sequences.
+    Masked-token prediction over tokenized signal.
 
-    Input:
-        input_ids : [Batch, num_vq_layers, Seq_len]
-                    Token IDs from 4 RVQ codebook layers.
-                    Valid range: [0, vocab_size-1] for real tokens,
-                                 MASK_TOKEN_ID for masked positions,
-                                 PAD_TOKEN_ID  for padding.
+    The prediction target is always the same: the RVQ code ids of the hidden frames,
+    one head per codebook. What differs is what the model reads, set by ``input_mode``:
 
-    Output:
+    ``"token"`` (default)
+        input_ids : [Batch, num_vq_layers, Seq_len] code ids, summed over codebooks
+        through one embedding table each. Hidden frames carry MASK_TOKEN_ID. The
+        quantizer sits in the input path: the model only ever sees what the codebooks
+        kept.
+
+    ``"latent"``
+        latent : [Batch, Seq_len, latent_dim], the tokenizer's encoder output before
+        quantization, through LayerNorm and a linear projection. Hidden frames are
+        replaced by a learned mask vector. The quantizer sits in the label path only,
+        and is not needed at inference.
+
+    Output (both modes):
         logits_list : List of num_vq_layers tensors, each [Batch, Seq_len, vocab_size]
-                      Layer q predicts the original token ID at masked positions of layer q.
+                      Head q predicts the code id of codebook q.
 
     Design notes:
-        - All 4 layers are masked simultaneously at the SAME positions.
-        - Each layer has its own prediction head with weight tying to its own embedding.
-        - Loss is computed only at masked positions, averaged across all 4 layers.
+        - All codebooks are masked at the SAME positions.
+        - Head q classifies against its own table ``token_embeddings[q]``. In token mode
+          that table is also the input embedding (weight tying); in latent mode there is
+          no token input, so it serves as the output prototypes only.
+        - Loss is computed only at masked positions, averaged across codebooks.
         - MASK_TOKEN_ID = vocab_size,     PAD_TOKEN_ID = vocab_size + 1
+        - A token-mode model has exactly the parameters it had before ``input_mode``
+          existed, so earlier checkpoints load unchanged.
     """
+
+    INPUT_MODES = ("token", "latent")
 
     # Special token IDs (fixed, not learnable)
     MASK_TOKEN_ID: int
@@ -39,12 +53,22 @@ class TokenTransformerMLM(nn.Module):
         max_seq_len:  int = 2048,
         num_vq_layers: int = 4,
         dropout:      float = 0.1,
+        input_mode:   str = "token",
+        latent_dim:   Optional[int] = None,
     ):
         super().__init__()
+
+        if input_mode not in self.INPUT_MODES:
+            raise ValueError(f"input_mode must be one of {self.INPUT_MODES}, got {input_mode!r}")
+        if input_mode == "latent" and latent_dim is None:
+            raise ValueError("input_mode='latent' needs latent_dim, the width of the "
+                             "tokenizer's encoder output")
 
         self.vocab_size    = vocab_size
         self.num_vq_layers = num_vq_layers
         self.d_model       = d_model
+        self.input_mode    = input_mode
+        self.latent_dim    = int(latent_dim) if input_mode == "latent" else None
 
         # Special token IDs
         self.MASK_TOKEN_ID = vocab_size        # 1024
@@ -93,6 +117,36 @@ class TokenTransformerMLM(nn.Module):
             for _ in range(num_vq_layers)
         ])
 
+        # ── 6. Continuous input (latent mode only) ───────────────────────────
+        # Created last, and only in latent mode: a token-mode model must keep both its
+        # state_dict keys and the order in which it consumes random numbers at
+        # initialisation, or published weights and seeded runs stop reproducing.
+        if input_mode == "latent":
+            self.input_norm = nn.LayerNorm(self.latent_dim)
+            self.input_proj = nn.Linear(self.latent_dim, d_model)
+            self.mask_embedding = nn.Parameter(torch.zeros(d_model))
+            nn.init.normal_(self.mask_embedding, mean=0.0, std=0.02)
+
+    # ── construction from a config ───────────────────────────────────────────
+    @classmethod
+    def from_config(cls, m: dict, **overrides):
+        """Build from the ``model`` section of a training config or a checkpoint's
+        ``model_config``. A config without ``input_mode`` describes a token-mode model,
+        which is what every config written before the option existed means."""
+        kw = dict(
+            vocab_size=int(m["vocab_size"]),
+            d_model=int(m["d_model"]),
+            nhead=int(m["n_head"]),
+            num_layers=int(m["n_layer"]),
+            max_seq_len=int(m["max_seq_len"]),
+            num_vq_layers=int(m.get("num_vq_layers", 4)),
+            dropout=float(m.get("dropout", 0.1)),
+            input_mode=m.get("input_mode", "token"),
+            latent_dim=m.get("latent_dim"),
+        )
+        kw.update(overrides)
+        return cls(**kw)
+
     # ── codebook initialisation (2026-09-22) ─────────────────────────────────
     @torch.no_grad()
     def init_embeddings_from_codebooks(self, codebooks, target_std: float = 0.02, freeze: bool = False):
@@ -113,53 +167,95 @@ class TokenTransformerMLM(nn.Module):
             for emb in self.token_embeddings: emb.weight.requires_grad_(False)
         return dict(scale=scale, ref_std=ref_std, freeze=freeze, per_layer=stats)
 
+    # ── input embedding ──────────────────────────────────────────────────────
+    def embed(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None,
+              cb_weights: Optional[List[float]] = None) -> torch.Tensor:
+        """The model's input, either mode -> [Batch, Seq_len, d_model] entering the encoder.
+
+        Token mode
+            x          : [B, Q, L] code ids (MASK_TOKEN_ID at hidden frames).
+            cb_weights : optional fixed per-codebook input weights; a zero drops that
+                         codebook from the input. Default: all codebooks, unweighted.
+        Latent mode
+            x    : [B, L, latent_dim] continuous latent.
+            mask : optional [B, L] bool; True frames are replaced by the learned mask
+                   vector. Leave None at inference.
+        """
+        if self.input_mode == "token":
+            B, Q, L = x.shape
+            assert Q == self.num_vq_layers, (
+                f"input_ids has {Q} VQ layers but model expects {self.num_vq_layers}"
+            )
+            if cb_weights is None:
+                # Each codebook contributes equally; summing is the standard approach
+                # (same as combining multiple token types in BERT).
+                e = self.token_embeddings[0](x[:, 0, :])                # [B, L, D]
+                for q in range(1, self.num_vq_layers):
+                    e = e + self.token_embeddings[q](x[:, q, :])
+            else:
+                assert len(cb_weights) == Q, (
+                    f"cb_weights has {len(cb_weights)} entries, model has {Q} codebooks")
+                e = None
+                for q in range(Q):
+                    if cb_weights[q] == 0:
+                        continue
+                    t = self.token_embeddings[q](x[:, q])
+                    if cb_weights[q] != 1:
+                        t = t * cb_weights[q]
+                    e = t if e is None else e + t
+        else:
+            B, L, D = x.shape
+            assert D == self.latent_dim, (
+                f"latent has width {D} but model expects {self.latent_dim}"
+            )
+            e = self.input_proj(self.input_norm(x))                     # [B, L, D]
+            if mask is not None:
+                e = torch.where(mask.unsqueeze(-1), self.mask_embedding.to(e.dtype), e)
+
+        assert L <= self.pos_embedding.shape[1], (
+            f"Sequence length {L} exceeds max_seq_len {self.pos_embedding.shape[1]}"
+        )
+        e = e + self.pos_embedding[:, :L, :]
+        e = self.input_layer_norm(e)
+        return self.input_dropout(e)
+
+    def hidden(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None,
+               src_key_padding_mask: Optional[torch.Tensor] = None,
+               cb_weights: Optional[List[float]] = None) -> torch.Tensor:
+        """Input -> last-layer residual stream [Batch, Seq_len, d_model].
+
+        This is what a downstream head attaches to. The model is pre-LN, so the stream
+        is not normalised here; the prediction heads and downstream code each apply
+        their own.
+        """
+        return self.transformer(self.embed(x, mask=mask, cb_weights=cb_weights),
+                                src_key_padding_mask=src_key_padding_mask)
+
     # ── forward ──────────────────────────────────────────────────────────────
     def forward(
         self,
-        input_ids:   torch.Tensor,                    # [B, Q, L]
+        x:           torch.Tensor,                    # token: [B, Q, L] ids; latent: [B, L, latent_dim]
         src_key_padding_mask: Optional[torch.Tensor] = None,  # [B, L] bool, True = pad
+        mask:        Optional[torch.Tensor] = None,   # latent mode: [B, L] bool, True = hidden frame
     ) -> List[torch.Tensor]:
         """
         Args:
-            input_ids             : [Batch, num_vq_layers, Seq_len]  long
+            x                     : the model's input in its ``input_mode`` (see class docstring)
             src_key_padding_mask  : [Batch, Seq_len] bool (True = position to ignore)
                                     Pass this when sequences are padded to equal length.
+            mask                  : latent mode only — frames to replace by the mask vector.
+                                    Token mode marks hidden frames inside ``x`` itself.
 
         Returns:
             logits_list : list of num_vq_layers tensors, each [Batch, Seq_len, vocab_size]
                           Logits over vocab_size real tokens (MASK / PAD not predicted).
         """
-        B, Q, L = input_ids.shape
-        assert Q == self.num_vq_layers, (
-            f"input_ids has {Q} VQ layers but model expects {self.num_vq_layers}"
-        )
-        assert L <= self.pos_embedding.shape[1], (
-            f"Sequence length {L} exceeds max_seq_len {self.pos_embedding.shape[1]}"
-        )
+        hidden_states = self.hidden(x, mask=mask, src_key_padding_mask=src_key_padding_mask)
 
-        # ── sum embeddings across all VQ layers ──────────────────────────────
-        # Each layer contributes equally; summing is the standard approach
-        # (same as combining multiple token types in BERT).
-        words_embeddings = self.token_embeddings[0](input_ids[:, 0, :])  # [B, L, D]
-        for q in range(1, self.num_vq_layers):
-            words_embeddings = words_embeddings + self.token_embeddings[q](input_ids[:, q, :])
-
-        # ── add positional encoding ───────────────────────────────────────────
-        embeddings = words_embeddings + self.pos_embedding[:, :L, :]     # [B, L, D]
-        embeddings = self.input_layer_norm(embeddings)
-        embeddings = self.input_dropout(embeddings)
-
-        # ── transformer ───────────────────────────────────────────────────────
-        hidden_states = self.transformer(
-            embeddings,
-            src_key_padding_mask=src_key_padding_mask,
-        )   # [B, L, D]
-
-        # ── per-layer prediction heads with weight tying ──────────────────────
-        # For layer q: logits = hidden_states @ E_q[:vocab_size].T + bias_q
-        # where E_q is the embedding matrix of layer q.
-        # MASK and PAD rows (indices vocab_size and vocab_size+1) are excluded
-        # from the prediction target — the model predicts only real tokens.
+        # ── per-codebook prediction heads ─────────────────────────────────────
+        # For codebook q: logits = hidden_states @ E_q[:vocab_size].T + bias_q
+        # where E_q is the table of codebook q. MASK and PAD rows (indices vocab_size
+        # and vocab_size+1) are excluded — the model predicts only real tokens.
         logits_list = []
         for q in range(self.num_vq_layers):
             tied_weight = self.token_embeddings[q].weight[:self.vocab_size, :]  # [V, D]

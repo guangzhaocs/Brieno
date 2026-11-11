@@ -233,7 +233,10 @@ def _add_train_transformer(subparsers):
         description=(
             "Self-supervised pretraining of the transformer on tokenized signal: spans of "
             "token positions are hidden and predicted from their context, in every "
-            "quantizer layer at once. Run under torchrun for multi-GPU training."
+            "quantizer layer at once. Run under torchrun for multi-GPU training. "
+            "With model.input_mode 'latent' in the config the transformer reads the "
+            "tokenizer's continuous latent instead of code ids and still predicts the code "
+            "ids; that mode trains on the signal corpus and needs --tokenizer."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -245,6 +248,9 @@ def _add_train_transformer(subparsers):
                    help="output subdirectory under training.save_dir [default: a timestamp]")
     p.add_argument("--resume", default=None, metavar="CKPT",
                    help="continue from a checkpoint written by an earlier run")
+    p.add_argument("-t", "--tokenizer", default=None, metavar="CKPT",
+                   help="latent input mode only: the frozen tokenizer that supplies the "
+                        "input and the targets [default: the config's \"tokenizer\" entry]")
     g = p.add_argument_group("config overrides (leave unset to use the config file)")
     g.add_argument("--lr", type=float, default=None)
     g.add_argument("--batch-size", type=int, default=None)
@@ -263,7 +269,8 @@ def _run_train_transformer(args):
         ("training", "grad_accum_steps", args.grad_accum_steps),
     ]
     pretrain_transformer(args.config, seed=args.seed, run_name=args.run_name,
-                         resume=args.resume, overrides=overrides)
+                         resume=args.resume, overrides=overrides,
+                         tokenizer=args.tokenizer)
     return 0
 
 

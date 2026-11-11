@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["load_transformer", "transformer_hidden", "FrozenFeatures", "FrozenStack",
-           "TransformerHidden"]
+__all__ = ["load_transformer", "transformer_hidden", "context_input", "FrozenFeatures",
+           "FrozenStack", "TransformerHidden"]
 
 
 def _bf16():
@@ -21,6 +21,10 @@ def _bf16():
 
 def load_transformer(checkpoint_path, device, trainable=False, random_init=False):
     """Rebuild the token transformer from a checkpoint that carries its own architecture.
+
+    The architecture includes the input mode, so a transformer that reads code ids and
+    one that reads the continuous latent load through the same call and the caller
+    need not know in advance which it has been given.
 
     ``random_init`` keeps the architecture but not the weights: the "no pretraining"
     control for a fine-tuned transformer, which is the only honest comparison for
@@ -33,9 +37,7 @@ def load_transformer(checkpoint_path, device, trainable=False, random_init=False
         raise ValueError(f"{checkpoint_path} carries no 'model_config'; it is not a "
                          "brieno transformer checkpoint")
     m = state["model_config"]
-    tf = TokenTransformerMLM(int(m["vocab_size"]), int(m["d_model"]), int(m["n_head"]),
-                             int(m["n_layer"]), int(m["max_seq_len"]),
-                             int(m["num_vq_layers"]), float(m["dropout"]))
+    tf = TokenTransformerMLM.from_config(m)
     if not random_init:
         sd = {(k[len("module."):] if k.startswith("module.") else k): v
               for k, v in state["model_state_dict"].items()}
@@ -47,8 +49,12 @@ def load_transformer(checkpoint_path, device, trainable=False, random_init=False
     return tf, m
 
 
-def transformer_hidden(tf, idx, cb_weights=None):
-    """Token ids [B, Q, L] -> last-layer residual stream [B, L, D].
+def transformer_hidden(tf, x, cb_weights=None):
+    """The transformer's input -> last-layer residual stream [B, L, D].
+
+    ``x`` is whatever the transformer reads: code ids [B, Q, L] for a token-mode model,
+    the continuous latent [B, L, latent_dim] for a latent-mode one. Nothing is masked —
+    this is the representation of the whole chunk, as a head sees it.
 
     The model is pre-LN and has no final norm of its own (the MLM heads supply it), so
     a parameter-free LayerNorm is applied here; without it the scale drifts with depth
@@ -57,21 +63,17 @@ def transformer_hidden(tf, idx, cb_weights=None):
     Gradients flow into ``tf`` when its parameters are trainable, which is the only
     difference between the frozen and fine-tuned heads.
     """
-    B, Q, L = idx.shape
-    w = cb_weights if cb_weights is not None else [1.0] * Q
-    assert len(w) == Q, f"cb_weights has {len(w)} entries, transformer has {Q} codebooks"
-
-    e = None
-    for q in range(Q):
-        if w[q] == 0:
-            continue
-        t = tf.token_embeddings[q](idx[:, q])
-        if w[q] != 1:
-            t = t * w[q]
-        e = t if e is None else e + t
-    e = tf.input_dropout(tf.input_layer_norm(e + tf.pos_embedding[:, :L]))
-    h = tf.transformer(e)
+    h = tf.hidden(x, cb_weights=cb_weights)
     return F.layer_norm(h.float(), (h.shape[-1],))
+
+
+def context_input(tf, latent, tokens):
+    """Pick what ``tf`` reads out of the tokenizer's two views of a chunk.
+
+    ``latent`` is channel-first [B, D, L] as the tokenizer's encoder emits it; a
+    latent-mode transformer wants it sequence-first.
+    """
+    return tokens if tf.input_mode == "token" else latent.transpose(1, 2)
 
 
 class FrozenFeatures(nn.Module):
@@ -118,7 +120,7 @@ class FrozenStack(nn.Module):
         if self.tf is None:
             return lat, q, idx
         with _bf16():
-            h = transformer_hidden(self.tf, idx, self.cb_w)
+            h = transformer_hidden(self.tf, context_input(self.tf, lat, idx), self.cb_w)
         return lat, q, idx, h.float()
 
 
@@ -134,6 +136,6 @@ class TransformerHidden(nn.Module):
         self.tf = tf
         self.cb_w = cb_w
 
-    def forward(self, idx):
+    def forward(self, x):
         with _bf16():
-            return transformer_hidden(self.tf, idx, self.cb_w).float()
+            return transformer_hidden(self.tf, x, self.cb_w).float()

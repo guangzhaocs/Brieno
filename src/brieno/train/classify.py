@@ -25,8 +25,8 @@ from torch.utils.data import DataLoader
 from brieno.data.encode import load_tokenizer
 from brieno.downstream.data import (BalancedSampler, ChunkDataset, PartIterDataset,
                                     load_split, subsample)
-from brieno.downstream.features import (FrozenFeatures, load_transformer,
-                                        transformer_hidden)
+from brieno.downstream.features import (FrozenFeatures, context_input,
+                                        load_transformer, transformer_hidden)
 from brieno.downstream.heads import Heads, RawEncoder
 from brieno.train.utils import JsonlLogger
 
@@ -55,12 +55,15 @@ def make_features(x, feat, tf, heads, raw=None):
     if raw is not None:
         with _autocast():
             f["D1"] = raw(x)
+    if "C1" in heads or "C2" in heads:
+        # code ids or the continuous latent, whichever this transformer was trained on
+        ctx = context_input(tf, f["A"], f["B2"])
     if "C1" in heads:
         with torch.no_grad(), _autocast():
-            f["C1"] = transformer_hidden(tf, f["B2"]).float()
+            f["C1"] = transformer_hidden(tf, ctx).float()
     if "C2" in heads:
         with _autocast():
-            f["C2"] = transformer_hidden(tf, f["B2"]).float()
+            f["C2"] = transformer_hidden(tf, ctx).float()
     return f
 
 
@@ -234,6 +237,7 @@ def finetune(root, setting, fold, tokenizer_ckpt, transformer_ckpt=None, heads=(
         tf, tf_cfg = load_transformer(transformer_ckpt, device, trainable=tf_train,
                                       random_init=transformer_random)
         print(f"transformer: {tf_cfg['n_layer']} layers, d_model {tf_cfg['d_model']}, "
+              f"reads {'code ids' if tf.input_mode == 'token' else 'the continuous latent'}, "
               f"{'fine-tuned' if tf_train else 'frozen'}"
               + ("  (randomly initialised control)" if transformer_random else ""))
 

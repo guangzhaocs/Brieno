@@ -4,6 +4,19 @@ Spans of token positions are hidden and the model predicts them from their conte
 in every quantizer layer at once. This is the stage that turns a per-chunk code into a
 contextual representation, and it is what the downstream heads are attached to.
 
+The target is always the code ids of the hidden frames. What the model reads is set by
+``model.input_mode`` in the config:
+
+``token`` (default)
+    The model reads code ids. The corpus is tokenized once with ``brieno train encode``
+    and training never touches the tokenizer again.
+
+``latent``
+    The model reads the tokenizer's continuous latent and predicts the code ids the
+    quantizer would have assigned. The corpus is the *signal* corpus — a stored latent
+    would be a hundred times its size — and the frozen tokenizer runs during training
+    to produce both the input and the targets.
+
 Run on one GPU::
 
     brieno train transformer -c config.json
@@ -28,7 +41,8 @@ from torch.utils.data import ConcatDataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from brieno.models.transformer import TokenTransformerMLM
-from brieno.train.data import BlendedTokenDataset, SpanMaskCollator, TokenDataset
+from brieno.train.data import (BlendedTokenDataset, MergedSignalDataset,
+                               SignalSpanMaskCollator, SpanMaskCollator, TokenDataset)
 from brieno.train.utils import (
     JsonlLogger,
     autocast,
@@ -65,14 +79,21 @@ def layer_accuracy(logits_list, labels, vocab_size, layer_weights):
 
 
 def _build(cfg, mode, world_size, verbose):
-    """Training blend (mode='train') or concatenated validation splits (mode='val')."""
+    """Training blend (mode='train') or concatenated validation splits (mode='val').
+
+    The files under ``datasets.root_dir`` are token arrays in token mode and signal
+    arrays in latent mode. Both are split by the same seed, so a dataset's held-out
+    chunks are the same chunks either way.
+    """
     root = cfg["datasets"]["root_dir"]
     val_size = cfg["datasets"]["validation_size_per_dataset"]
+    Corpus = (MergedSignalDataset if cfg["model"].get("input_mode", "token") == "latent"
+              else TokenDataset)
 
     if mode == "val":
         parts = []
         for name in cfg["datasets"]["validation"]:
-            ds = TokenDataset(os.path.join(root, name + ".npy"), mode="val", val_size=val_size)
+            ds = Corpus(os.path.join(root, name + ".npy"), mode="val", val_size=val_size)
             parts.append(ds)
             if verbose:
                 print(f"  [val]   {name:50s} chunks={len(ds):>10,d}")
@@ -80,8 +101,8 @@ def _build(cfg, mode, world_size, verbose):
 
     datasets, weights = [], []
     for entry in cfg["datasets"]["weights"]:
-        ds = TokenDataset(os.path.join(root, entry["name"] + ".npy"),
-                          mode="train", val_size=val_size)
+        ds = Corpus(os.path.join(root, entry["name"] + ".npy"),
+                    mode="train", val_size=val_size)
         datasets.append(ds)
         weights.append(float(entry["weight"]))
         if verbose:
@@ -95,12 +116,76 @@ def _build(cfg, mode, world_size, verbose):
                                world_size=world_size)
 
 
+def _load_frozen_tokenizer(cfg, device):
+    """Latent mode: load the tokenizer that supplies the input and the targets, and
+    make the transformer's config agree with it.
+
+    The transformer's vocabulary, codebook count and input width are properties of the
+    tokenizer, not free choices; taking them from the tokenizer — and refusing a config
+    that contradicts it — is what keeps a mismatch from surfacing as a shape error
+    deep in the first batch, or worse, not at all.
+    """
+    from brieno.data.encode import load_tokenizer
+
+    path = cfg.get("tokenizer")
+    if not path:
+        raise ValueError("model.input_mode is 'latent': a tokenizer checkpoint is needed "
+                         "to compute the input and the targets (--tokenizer, or a "
+                         "top-level \"tokenizer\" entry in the config)")
+    tok, tok_cfg = load_tokenizer(path, device=device)
+    for p in tok.parameters():
+        p.requires_grad_(False)
+
+    m = cfg["model"]
+    for key, expected, what in (
+            ("vocab_size", int(tok_cfg["num_tokens"]), "codebook size"),
+            ("num_vq_layers", int(tok_cfg["num_quantizers"]), "number of codebooks")):
+        if int(m.get(key, expected)) != expected:
+            raise ValueError(f"model.{key} is {m[key]} but the tokenizer's {what} is "
+                             f"{expected}; the targets are the tokenizer's code ids")
+        m[key] = expected
+    if m.get("latent_dim") not in (None, tok.latent_dim):
+        raise ValueError(f"model.latent_dim is {m['latent_dim']} but the tokenizer's "
+                         f"latent is {tok.latent_dim}-d")
+    m["latent_dim"] = tok.latent_dim
+    return tok
+
+
+def _prepare(batch, device, tokenizer=None):
+    """A collated batch -> ``(model input, mask, labels)`` for either input mode.
+
+    Token mode: the collator already wrote the mask into the ids, so the batch passes
+    through. Latent mode: the frozen tokenizer turns the signal into the latent the
+    model reads and the code ids it must predict, and the collator's masking decision
+    is applied to the latent here.
+    """
+    if tokenizer is None:
+        input_ids, labels = batch
+        return (input_ids.to(device, non_blocking=True), None,
+                labels.to(device, non_blocking=True))
+
+    signal, masked, replace, random, source = (t.to(device, non_blocking=True) for t in batch)
+    with torch.no_grad():
+        # fp32 on purpose, outside the trainer's autocast: a code id is a
+        # nearest-neighbour decision, and half precision moves the boundaries. These
+        # targets are then the ids `brieno train encode` writes for the same chunks.
+        latent, tokens = tokenizer.encode(signal)
+    latent = latent.float()
+    labels = tokens.masked_fill(~masked.unsqueeze(1), -100)
+    if random.any():
+        donors = latent.reshape(-1, latent.shape[-1])[source[random]]
+        latent = latent.clone()
+        latent[random] = donors
+    return latent, replace, labels
+
+
 def _save(path, model, optimizer, scheduler, scaler, cfg, epoch, global_step, is_distributed):
     torch.save({
         "format": 1,
         "epoch": epoch,
         "global_step": global_step,
         "model_config": cfg["model"],
+        **({"tokenizer": os.path.basename(cfg["tokenizer"])} if cfg.get("tokenizer") else {}),
         "model_state_dict": (model.module if is_distributed else model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -108,8 +193,13 @@ def _save(path, model, optimizer, scheduler, scaler, cfg, epoch, global_step, is
     }, path)
 
 
-def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, overrides=None):
-    """Pretrain a :class:`TokenTransformerMLM` from a JSON config. Returns the output directory."""
+def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, overrides=None,
+                         tokenizer=None):
+    """Pretrain a :class:`TokenTransformerMLM` from a JSON config. Returns the output directory.
+
+    ``tokenizer`` is a tokenizer checkpoint, needed in latent mode only; it overrides
+    the config's top-level ``tokenizer`` entry.
+    """
     is_distributed, local_rank, global_rank, world_size = setup_distributed()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     is_main = global_rank == 0
@@ -119,6 +209,13 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
     for section, key, value in (overrides or []):
         if value is not None:
             cfg[section][key] = value
+    if tokenizer is not None:
+        cfg["tokenizer"] = tokenizer
+
+    input_mode = cfg["model"].get("input_mode", "token")
+    frozen_tokenizer = None
+    if input_mode == "latent":
+        frozen_tokenizer = _load_frozen_tokenizer(cfg, device)
 
     seed = int(cfg["training"].get("seed", 42)) if seed is None else int(seed)
     torch.manual_seed(seed + global_rank)
@@ -161,10 +258,15 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
     if grad_accum > 1:
         train_set.epoch_samples *= grad_accum
 
-    collate = SpanMaskCollator(mask_ratio=cfg["masking"]["mask_ratio"],
-                               min_span=cfg["masking"]["min_span"],
-                               mask_token_id=vocab_size,          # == model.MASK_TOKEN_ID
-                               vocab_size=vocab_size)
+    if frozen_tokenizer is None:
+        collate = SpanMaskCollator(mask_ratio=cfg["masking"]["mask_ratio"],
+                                   min_span=cfg["masking"]["min_span"],
+                                   mask_token_id=vocab_size,      # == model.MASK_TOKEN_ID
+                                   vocab_size=vocab_size)
+    else:
+        collate = SignalSpanMaskCollator(mask_ratio=cfg["masking"]["mask_ratio"],
+                                         min_span=cfg["masking"]["min_span"],
+                                         downsample=frozen_tokenizer.downsample)
 
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=global_rank,
                                        shuffle=True) if is_distributed else None
@@ -181,21 +283,16 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
                             collate_fn=collate)
 
     # ---------------------------------------------------------------- model
-    model = TokenTransformerMLM(
-        vocab_size=vocab_size,
-        d_model=int(cfg["model"]["d_model"]),
-        nhead=int(cfg["model"]["n_head"]),
-        num_layers=int(cfg["model"]["n_layer"]),
-        max_seq_len=int(cfg["model"]["max_seq_len"]),
-        num_vq_layers=n_vq,
-        dropout=float(cfg["model"].get("dropout", 0.1)),
-    ).to(device)
+    model = TokenTransformerMLM.from_config(cfg["model"]).to(device)
     base_model = model
     if is_main:
         n_params = sum(p.numel() for p in model.parameters())
         print(f"\ntransformer: {cfg['model']['n_layer']} layers, {cfg['model']['n_head']} heads, "
               f"d_model {cfg['model']['d_model']}, {n_vq} quantizer layers "
               f"| {n_params / 1e6:.1f} M parameters")
+        print("input: code ids" if frozen_tokenizer is None else
+              f"input: continuous latent ({cfg['model']['latent_dim']}-d) from the frozen "
+              f"tokenizer {os.path.basename(cfg['tokenizer'])}; targets: its code ids")
         print(f"batch {batch_size} x world {world_size} x accum {grad_accum} "
               f"= effective {batch_size * world_size * grad_accum}")
 
@@ -203,11 +300,10 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
         base_model = model.module
 
-    # Biases and LayerNorm gains are excluded from weight decay: they are not
-    # weights in the sense decay is meant for, and shrinking them fights the
-    # normalisation itself. Standard practice for transformers, and what the
-    # released weights were trained with.
-    no_decay = ("bias", "LayerNorm.weight")
+    # Biases are excluded from weight decay. Everything else is decayed, LayerNorm
+    # gains and the positional table included: this is the grouping the released
+    # weights were trained with, and it is kept so that the recipe stays theirs.
+    no_decay = ("bias",)
     decayed, plain = [], []
     for name, param in model.named_parameters():
         (plain if any(tag in name for tag in no_decay) else decayed).append(param)
@@ -222,7 +318,7 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
     )
     if is_main:
         print(f"optimizer: AdamW, {len(decayed)} tensors decayed, "
-              f"{len(plain)} exempt (bias / LayerNorm)")
+              f"{len(plain)} exempt (biases)")
     epochs = int(cfg["training"]["epochs"])
     steps_per_epoch = len(train_loader) // grad_accum
     total_steps = epochs * steps_per_epoch
@@ -256,18 +352,17 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
         # step averages the same number of micro-batches.
         n_micro = len(train_loader) - (len(train_loader) % grad_accum)
 
-        for step, (input_ids, labels) in enumerate(train_loader):
+        for step, batch in enumerate(train_loader):
             if step >= n_micro:
                 break
-            input_ids = input_ids.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            x, mask, labels = _prepare(batch, device, frozen_tokenizer)
 
             is_last_micro = (step + 1) % grad_accum == 0
             # Skip the DDP all-reduce on every micro-batch but the last of a group.
             sync = nullcontext() if (is_last_micro or not is_distributed) else model.no_sync()
             with sync:
                 with autocast():
-                    logits_list = model(input_ids)
+                    logits_list = model(x, mask=mask)
                     loss = base_model.compute_mlm_loss(logits_list, labels, layer_weights)
                 scaler.scale(loss / grad_accum).backward()
 
@@ -308,11 +403,10 @@ def pretrain_transformer(config_path, seed=None, run_name=None, resume=None, ove
         acc_sum = {f"L{q + 1}": [0.0, 0.0] for q in range(n_vq)}
 
         with torch.no_grad():
-            for input_ids, labels in val_loader:
-                input_ids = input_ids.to(device, non_blocking=True)
-                labels = labels.to(device, non_blocking=True)
+            for batch in val_loader:
+                x, mask, labels = _prepare(batch, device, frozen_tokenizer)
                 with autocast():
-                    logits_list = model(input_ids)
+                    logits_list = model(x, mask=mask)
                     loss = base_model.compute_mlm_loss(logits_list, labels, layer_weights)
                 acc = layer_accuracy(logits_list, labels, vocab_size, layer_weights)
                 for k, (t1, t5) in acc.items():

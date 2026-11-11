@@ -620,6 +620,36 @@ class SignalTokenizer(nn.Module):
             return q, out[1], out[2], out[3], out[4]
         return q, out[1], out[2], out[3]
 
+    @property
+    def latent_dim(self) -> int:
+        """Width of the continuous latent returned by :meth:`encode` (the encoder output)."""
+        return self.hidden_dim
+
+    def encode(self, x):
+        """Raw signal -> what a sequence model consumes, in both representations.
+
+        Returns ``(latent, tokens)``:
+
+        * ``latent`` ``[B, L, hidden_dim]`` — the encoder output **before** quantization;
+        * ``tokens`` ``[B, num_quantizers, L]`` — the code ids the quantizer assigns to it.
+
+        The two describe the same frames, so a caller can feed one and predict the
+        other. A transformer that reads tokens uses ``tokens`` as both input and
+        target; one that reads the continuous latent uses ``latent`` as input and
+        ``tokens`` as target, which moves the quantizer out of the input path and into
+        the label path. Both layouts are sequence-first, unlike the channel-first
+        tensors the convolutional encoder and decoder exchange internally.
+
+        The quantizer always runs in fp32 (see :meth:`quantize`); whether the encoder
+        runs under autocast is the caller's choice, and it matters: a code id is a
+        nearest-neighbour decision, so ids computed from a half-precision latent can
+        differ from fp32 ones at the boundaries. Use the same precision that produced
+        the tokens you intend to compare against.
+        """
+        latent = self.encoder(x)                                    # [B, hidden, L]
+        _, tokens, _, _ = self.quantize(latent)                     # [Q, B, L]
+        return latent.transpose(1, 2), tokens.permute(1, 0, 2)
+
     def forward(self, x):
         """
             Input:

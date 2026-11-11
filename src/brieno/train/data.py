@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import Dataset
 
 __all__ = ["MergedSignalDataset", "BlendedDataset", "TokenDataset",
-           "BlendedTokenDataset", "SpanMaskCollator"]
+           "BlendedTokenDataset", "SpanMaskCollator", "SignalSpanMaskCollator"]
 
 
 class MergedSignalDataset(Dataset):
@@ -191,3 +191,47 @@ class SpanMaskCollator:
             input_ids[sel] = rand_tokens[sel]
         # the remaining 10 % keep their original token, already copied above
         return input_ids, labels
+
+
+class SignalSpanMaskCollator:
+    """Span masking for a transformer that reads the continuous latent.
+
+    The batch is raw signal, because the latent is far too large to store and is
+    computed by the frozen tokenizer during training. The mask therefore cannot be
+    applied here: this collator only decides *which frames* are hidden and how, and the
+    trainer applies the decision once the latent exists.
+
+    Returns ``(signal, masked, replace, random, source)``:
+
+    * ``signal``  ``[B, 1, S]`` float32;
+    * ``masked``  ``[B, L]`` bool — frames the model must predict (``L = S // downsample``);
+    * ``replace`` ``[B, L]`` bool — of those, the 80 % to overwrite with the mask vector;
+    * ``random``  ``[B, L]`` bool — the 10 % to overwrite with another frame's latent;
+    * ``source``  ``[B, L]`` long — for ``random`` frames, which frame of the batch
+      (flattened ``B * L``) to copy from.
+
+    The remaining 10 % of masked frames keep their own latent. The span rule and the
+    80 / 10 / 10 split are those of :class:`SpanMaskCollator`, so the two input modes
+    differ in what the model reads and in nothing else about the task.
+    """
+
+    def __init__(self, mask_ratio, min_span, downsample):
+        self.mask_ratio = mask_ratio
+        self.min_span = min_span
+        self.downsample = int(downsample)
+        self.mask_start_prob = 1.0 - (1.0 - mask_ratio) ** (1.0 / min_span)
+
+    def __call__(self, batch):
+        signal = torch.stack(batch).float()                  # [B, 1, S]
+        B, L = signal.shape[0], signal.shape[-1] // self.downsample
+
+        starts = torch.rand(B, L) < self.mask_start_prob
+        masked = starts.clone()
+        for k in range(1, self.min_span):                    # grow starts into spans
+            masked[:, k:] = masked[:, k:] | starts[:, :-k]
+
+        rand_vals = torch.rand(B, L)
+        replace = masked & (rand_vals < 0.8)
+        random = masked & (rand_vals >= 0.8) & (rand_vals < 0.9)
+        source = torch.randint(0, B * L, (B, L))
+        return signal, masked, replace, random, source

@@ -44,6 +44,10 @@ raw FAST5/POD5
 Basecalling and modification heads are fine-tuned by commands of their own, which are
 being prepared; the two classification tasks share one command and are here.
 
+The transformer can also be pretrained on the tokenizer's continuous latent instead of
+its tokens, which drops the `encode` step; see
+[Reading the latent instead of the tokens](#reading-the-latent-instead-of-the-tokens-experimental).
+
 ---
 
 ## Install
@@ -308,7 +312,8 @@ arithmetic.
 
 `betas` and `eps` default to `(0.9, 0.98)` and `1e-6`, the transformer convention rather
 than PyTorch's AdamW defaults, and the values the released weights were trained with.
-Biases and LayerNorm gains are automatically excluded from weight decay.
+Biases are excluded from weight decay; every other parameter is decayed, LayerNorm
+gains included. The count of each group is printed at startup.
 
 ### Output
 
@@ -328,6 +333,52 @@ What to watch in `history.jsonl`:
 - **`top1_L1` … `top1_L4`** — per-layer accuracy at masked positions. L1 should climb
   well above the others; later layers staying near chance is expected, not a fault,
   and is why their loss weights are small.
+
+### Reading the latent instead of the tokens (experimental)
+
+Everything above describes a transformer that reads token ids, which is what the
+released model is. `model.input_mode` selects what the transformer reads:
+
+| `input_mode` | the transformer reads | it predicts |
+|---|---|---|
+| `"token"` (default) | the code ids of each frame, one embedding table per codebook | the code ids of the hidden frames |
+| `"latent"` | the tokenizer's encoder output for each frame, before quantization | the code ids of the hidden frames |
+
+The task is the same in both — the same frames hidden, the same targets, the same
+`layer_weights`. What moves is the quantizer: in token mode it sits in the input path,
+so the transformer only ever sees what the codebooks kept; in latent mode it sits in
+the label path only, the transformer sees the full-precision latent, and at inference
+the quantizer is not needed at all.
+
+```bash
+brieno train transformer -c configs/transformer_latent_dna_r9.json --tokenizer tokenizer.pt
+```
+
+What changes in the workflow:
+
+- **No `encode` step.** `datasets.root_dir` points at the *signal* corpus from step 2,
+  not at a tokenized one. A stored latent would be about a hundred times the size of
+  the signal it came from, so the frozen tokenizer runs during training instead and
+  produces both the input and the targets for each batch. Its encoder is small next
+  to the transformer, so this adds little to the cost of a step.
+- **A tokenizer is required**, as `--tokenizer` or a top-level `"tokenizer"` entry in
+  the config. `vocab_size`, `num_vq_layers` and `latent_dim` are properties of that
+  tokenizer and are filled in from it; a config that contradicts it is refused. The
+  targets are computed in full precision, so they are the ids `brieno train encode`
+  would write for the same chunks.
+- **Hidden frames** are replaced by a learned mask vector (80 %), by the latent of
+  another frame in the batch (10 %), or left as they are (10 %) — the same split the
+  token mode applies to ids.
+
+The checkpoint records its input mode, so nothing downstream needs a flag:
+`brieno train classify` feeds heads `C1` and `C2` token ids or the latent according to
+the transformer it is given.
+
+Two cautions. No released weights were trained this way, and the recipe in
+`configs/transformer_latent_dna_r9.json` is the token recipe with the input switched,
+not a tuned one. And the pretraining loss of the two modes cannot be compared: they
+solve the same task from different inputs, so a lower loss in one says nothing about
+which transformer is the better starting point. Compare them on a downstream task.
 
 ---
 
@@ -377,6 +428,11 @@ mean something.
 | `C1` | token ids through the pretrained transformer, frozen | yes |
 | `C2` | the same, with the transformer fine-tuned | yes |
 | `D1` | the encoder architecture trained from scratch on the task | no |
+
+`C1` and `C2` feed the transformer whatever it was pretrained on: token ids for the
+released model, the continuous latent for one pretrained in
+[latent mode](#reading-the-latent-instead-of-the-tokens-experimental). The checkpoint
+says which, so the command line is the same.
 
 `C2` is usually the most accurate and `C1` close behind, but `C1` has a property `C2`
 does not: its transformer is unchanged, so every `C1` head in existence shares one
